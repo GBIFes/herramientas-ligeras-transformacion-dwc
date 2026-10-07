@@ -1,0 +1,16 @@
+# 1. Ignorar todos los archivos y carpetas por defecto
+*
+
+# 2. Permitir que Git entre en todos los directorios a buscar excepciones
+!*/
+
+# 3. Incluir todos los archivos de Python (en la raíz y subdirectorios)
+!*.py
+
+# 4. Incluir la configuración y metadatos propios de Git y GitHub
+!.gitignore
+!.gitattributes
+!.github/
+!.github/**
+!README*
+!LICENSE*
