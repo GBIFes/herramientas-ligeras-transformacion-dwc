@@ -3,6 +3,9 @@ from tkinter import filedialog
 import zipfile
 import os
 
+from dwca_access import export_zip_to_access
+from dwca_excel import export_zip_to_excel
+
 
 class WelcomeFrame(tk.Frame):
     def __init__(self, root, viewer):
@@ -25,6 +28,24 @@ class WelcomeFrame(tk.Frame):
             bg="#289530",
             fg="white",
             command=self.open_zip
+        ).pack(pady=10)
+
+        tk.Button(
+            self,
+            text="Exportar DwC-A a Access (.accdb)",
+            font=("Segoe UI", 14),
+            bg="#1f6fb2",
+            fg="white",
+            command=lambda: export_zip_to_access(self.root)
+        ).pack(pady=10)
+
+        tk.Button(
+            self,
+            text="Exportar DwC-A a Excel (.xlsx)",
+            font=("Segoe UI", 14),
+            bg="#217346",
+            fg="white",
+            command=lambda: export_zip_to_excel(self.root)
         ).pack(pady=10)
 
     def set_eml_viewer_class(self, cls):

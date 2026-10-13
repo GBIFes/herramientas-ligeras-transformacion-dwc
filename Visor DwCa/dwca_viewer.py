@@ -1,8 +1,11 @@
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 import webbrowser
 from dwca_loader import DwcaLoader
 from dwca_model import DwcaModel
+from dwca_access import export_dwca_to_access
+from dwca_excel import export_dwca_to_excel
 
 def is_url(text):
     return isinstance(text, str) and (text.startswith("http://") or text.startswith("https://"))
@@ -47,6 +50,28 @@ class ViewerFrame(tk.Frame):
             command=self.close_viewer
         )
         self.btn_close.pack(side="right", padx=10, pady=5)
+
+        self.btn_access = tk.Button(
+            self.top_bar,
+            text="Exportar a Access",
+            font=("Segoe UI", 10, "bold"),
+            bg="#1f6fb2",
+            fg="white",
+            relief="flat",
+            command=self.export_access
+        )
+        self.btn_access.pack(side="right", padx=5, pady=5)
+
+        self.btn_excel = tk.Button(
+            self.top_bar,
+            text="Exportar a Excel",
+            font=("Segoe UI", 10, "bold"),
+            bg="#217346",
+            fg="white",
+            relief="flat",
+            command=self.export_excel
+        )
+        self.btn_excel.pack(side="right", padx=5, pady=5)
 
         # -------------------------------
         # PANEL PRINCIPAL
@@ -139,6 +164,28 @@ class ViewerFrame(tk.Frame):
         if self.welcome_frame is not None:
             self.pack_forget()
             self.welcome_frame.pack(fill="both", expand=True)
+
+    # ---------------------------------------------------------
+    # EXPORTAR A ACCESS
+    # ---------------------------------------------------------
+    def export_access(self):
+        if self.model is None:
+            messagebox.showwarning("Exportar a Access", "Primero abre un DwC-A.")
+            return
+        eml_path = os.path.join(os.path.dirname(self.core_path), "eml.xml")
+        export_dwca_to_access(self.root, self.core_fields, self.core_rows,
+                              self.extensions, self.ext_data, eml_path)
+
+    # ---------------------------------------------------------
+    # EXPORTAR A EXCEL
+    # ---------------------------------------------------------
+    def export_excel(self):
+        if self.model is None:
+            messagebox.showwarning("Exportar a Excel", "Primero abre un DwC-A.")
+            return
+        eml_path = os.path.join(os.path.dirname(self.core_path), "eml.xml")
+        export_dwca_to_excel(self.root, self.core_fields, self.core_rows,
+                             self.extensions, self.ext_data, eml_path)
 
     # ---------------------------------------------------------
     # CARGA DE DATOS
