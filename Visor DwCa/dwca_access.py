@@ -16,11 +16,14 @@ Requisitos (solo Windows):
 import os
 import re
 import sys
+import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 try:
     import pyodbc
+    # Sin pooling, ODBC suelta el .accdb al cerrar la conexión y Access puede abrirlo después
+    pyodbc.pooling = False
 except ImportError:
     pyodbc = None
 
@@ -80,6 +83,7 @@ def _create_empty_accdb(path):
             catalog = win32com.client.Dispatch("ADOX.Catalog")
             catalog.Create(f"Provider={provider};Data Source={path};")
             catalog.ActiveConnection.Close()
+            catalog = None
             return
         except Exception as e:  # noqa: BLE001
             last_error = e
@@ -229,11 +233,17 @@ def build_access_db(path, core_fields, core_rows, extensions, ext_data,
         on_message("Creando formularios de Access (puede tardar)...")
         try:
             from dwca_access_forms import create_forms as _create_forms
-            _create_forms(path, schema, eml_schema)
+            warnings.extend(_create_forms(path, schema, eml_schema) or [])
         except Exception as e:  # noqa: BLE001
+            log_path = os.path.splitext(path)[0] + "_error_formularios.txt"
+            try:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(traceback.format_exc())
+            except OSError:
+                log_path = "(no se pudo escribir el registro)"
             warnings.append(
-                "La base de datos se creó, pero no se pudieron generar los formularios "
-                f"(¿está instalado Microsoft Access completo?): {e}"
+                "La base de datos se creó, pero no se pudieron generar los formularios: "
+                f"{e}\nDetalle completo en: {log_path}"
             )
 
     return warnings
