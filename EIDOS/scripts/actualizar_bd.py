@@ -1,42 +1,117 @@
 """
 actualizar_bd.py
 
-Actualiza la base de datos local ejecutando
+Actualiza la tabla especies a partir
+del fichero de descarga que genera
 descargar_taxones.py.
 
-Autor: Javier Estrada
+Uso:
+
+    python actualizar_bd.py
 """
 
 from pathlib import Path
-import subprocess
-import sys
+import sqlite3
+
+import pandas as pd
+
+from modulos.config import (
+    DATA_DIR,
+    DB
+)
+
 
 # ==========================================================
-# Rutas
+# FICHERO
 # ==========================================================
 
-BASE_DIR = Path(__file__).resolve().parent
+CSV = (
+    DATA_DIR /
+    "taxones_eidos.csv"
+)
 
-SCRIPT_DESCARGA = BASE_DIR / "descargar_taxones.py"
 
-print("\nActualizando base de datos...\n")
+# ==========================================================
+# SQLITE
+# ==========================================================
 
-print("Script:")
-print(SCRIPT_DESCARGA)
-print()
+def conectar():
 
-try:
+    return sqlite3.connect(DB)
 
-    resultado = subprocess.run(
-        [sys.executable, str(SCRIPT_DESCARGA)],
-        check=True
+
+# ==========================================================
+# COMPROBACIONES
+# ==========================================================
+
+def comprobar_csv():
+
+    if not CSV.exists():
+
+        raise FileNotFoundError(
+            f"No existe:\n{CSV}"
+        )
+
+
+# ==========================================================
+# CARGA
+# ==========================================================
+
+def cargar_csv():
+
+    comprobar_csv()
+
+    return pd.read_csv(
+        CSV,
+        encoding="utf-8"
     )
 
-    print("\n===================================")
-    print("Actualización completada")
-    print("===================================\n")
 
-except subprocess.CalledProcessError as e:
+# ==========================================================
+# SUSTITUCIÓN
+# ==========================================================
 
-    print("\nERROR durante la actualización")
-    print(e)
+def actualizar():
+
+    df = cargar_csv()
+
+    conn = conectar()
+
+    df.to_sql(
+
+        "especies",
+
+        conn,
+
+        if_exists="replace",
+
+        index=False
+
+    )
+
+    conn.close()
+
+    return len(df)
+
+
+# ==========================================================
+# MAIN
+# ==========================================================
+
+def main():
+
+    total = actualizar()
+
+    print()
+
+    print(
+        f"Registros cargados: "
+        f"{total:,}"
+    )
+
+    print()
+
+
+if __name__ == "__main__":
+
+    main()

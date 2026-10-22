@@ -1,126 +1,171 @@
 """
 estadisticas_bd.py
 
-Muestra estadísticas de la base de datos
-especies_legales.sqlite
+Estadísticas generales de la base EIDOS.
 
-Autor: Javier Estrada
+Uso:
+
+    python estadisticas_bd.py
 """
 
-from pathlib import Path
-import sqlite3
+from modulos.conexion import (
+    conectar
+)
 
 
 # ==========================================================
-# Rutas
+# CONTADOR
 # ==========================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+def contar(sql):
 
-DB = BASE_DIR / "data" / "especies_legales.sqlite"
+    conn = conectar()
 
-print("\nBase de datos:")
-print(DB)
+    cur = conn.cursor()
 
-if not DB.exists():
-    print("\nERROR: La base de datos no existe.")
-    exit()
+    cur.execute(sql)
 
+    valor = cur.fetchone()[0]
 
-# ==========================================================
-# Conexión
-# ==========================================================
-
-conn = sqlite3.connect(DB)
-cur = conn.cursor()
-
-
-# ==========================================================
-# Comprobar tabla
-# ==========================================================
-
-cur.execute("""
-SELECT name
-FROM sqlite_master
-WHERE type='table'
-  AND name='especies'
-""")
-
-if cur.fetchone() is None:
-    print("\nERROR: La tabla 'especies' no existe.")
     conn.close()
-    exit()
+
+    return valor
 
 
 # ==========================================================
-# Estadísticas generales
+# RESUMEN
 # ==========================================================
 
-cur.execute("""
-SELECT COUNT(*)
-FROM especies
-""")
+def resumen():
 
-total = cur.fetchone()[0]
+    total_especies = contar(
+        """
+        SELECT COUNT(*)
+        FROM especies
+        """
+    )
 
+    nombres = contar(
+        """
+        SELECT COUNT(*)
+        FROM nombres_comunes
+        """
+    )
 
-cur.execute("""
-SELECT COUNT(*)
-FROM especies
-WHERE es_no_nativa = 1
-""")
+    conservacion = contar(
+        """
+        SELECT COUNT(*)
+        FROM estado_conservacion
+        """
+    )
 
-no_nativas = cur.fetchone()[0]
+    legal = contar(
+        """
+        SELECT COUNT(*)
+        FROM estado_legal
+        """
+    )
 
+    colecciones = contar(
+        """
+        SELECT COUNT(*)
+        FROM colecciones_catalogos
+        """
+    )
 
-cur.execute("""
-SELECT COUNT(*)
-FROM especies
-WHERE es_cites = 1
-""")
+    bibliografia = contar(
+        """
+        SELECT COUNT(*)
+        FROM bibliografia
+        """
+    )
 
-cites = cur.fetchone()[0]
+    enriquecidos = contar(
+        """
+        SELECT COUNT(*)
 
+        FROM control_enriquecimiento
 
-cur.execute("""
-SELECT COUNT(*)
-FROM especies
-WHERE es_euring = 1
-""")
+        WHERE
 
-euring = cur.fetchone()[0]
+            generales = 1
 
+            AND nombres = 1
 
-cur.execute("""
-SELECT COUNT(*)
-FROM especies
-WHERE es_red_natura = 1
-""")
+            AND conservacion = 1
 
-red_natura = cur.fetchone()[0]
+            AND colecciones = 1
+
+            AND estado_legal = 1
+
+            AND bibliografia = 1
+        """
+    )
+
+    return {
+        "especies": total_especies,
+        "nombres": nombres,
+        "conservacion": conservacion,
+        "legal": legal,
+        "colecciones": colecciones,
+        "bibliografia": bibliografia,
+        "enriquecidos": enriquecidos
+    }
 
 
 # ==========================================================
-# Mostrar resultados
+# MAIN
 # ==========================================================
 
-print("\n" + "=" * 50)
-print("ESTADÍSTICAS DE LA BASE DE DATOS")
-print("=" * 50)
+def main():
 
-print(f"\nTotal especies     : {total:,}")
-print(f"No nativas         : {no_nativas:,}")
-print(f"CITES              : {cites:,}")
-print(f"EURING             : {euring:,}")
-print(f"Red Natura 2000    : {red_natura:,}")
+    datos = resumen()
 
-print("\nPorcentaje sobre el total:")
+    print()
+    print("=" * 60)
+    print("EIDOS - ESTADÍSTICAS")
+    print("=" * 60)
 
-print(f"No nativas         : {(no_nativas/total)*100:.2f}%")
-print(f"CITES              : {(cites/total)*100:.2f}%")
-print(f"EURING             : {(euring/total)*100:.2f}%")
-print(f"Red Natura 2000    : {(red_natura/total)*100:.2f}%")
+    print()
 
-conn.close()
+    print(
+        f"Especies: "
+        f"{datos['especies']:,}"
+    )
 
-print("\nProceso finalizado.")
+    print(
+        f"Nombres comunes: "
+        f"{datos['nombres']:,}"
+    )
+
+    print(
+        f"Estados conservación: "
+        f"{datos['conservacion']:,}"
+    )
+
+    print(
+        f"Estados legales: "
+        f"{datos['legal']:,}"
+    )
+
+    print(
+        f"Colecciones: "
+        f"{datos['colecciones']:,}"
+    )
+
+    print(
+        f"Bibliografía: "
+        f"{datos['bibliografia']:,}"
+    )
+
+    print(
+        f"Taxones enriquecidos: "
+        f"{datos['enriquecidos']:,}"
+    )
+
+    print()
+
+
+if __name__ == "__main__":
+
+    main()

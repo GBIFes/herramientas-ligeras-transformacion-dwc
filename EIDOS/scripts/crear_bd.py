@@ -1,22 +1,27 @@
-import sqlite3
-from pathlib import Path
+"""
+crear_bd.py
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+Crea la base de datos SQLite inicial
+para el proyecto EIDOS.
 
-DATA_DIR = BASE_DIR / "data"
+Uso:
 
-DATA_DIR.mkdir(exist_ok=True)
+    python crear_bd.py
+"""
 
-DB = DATA_DIR / "especies_legales.sqlite"
+from modulos.conexion import (
+    conectar
+)
 
-conn = sqlite3.connect(DB)
 
-cur = conn.cursor()
+# ==========================================================
+# TABLA PRINCIPAL
+# ==========================================================
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS especies (
+SQL_ESPECIES = """
+CREATE TABLE IF NOT EXISTS especies(
 
-    taxonid INTEGER PRIMARY KEY,
+    taxonid REAL,
 
     scientificnameid TEXT,
 
@@ -44,29 +49,65 @@ CREATE TABLE IF NOT EXISTS especies (
 
     rednaturacode TEXT,
 
-    es_no_nativa INTEGER DEFAULT 0,
+    es_no_nativa INTEGER,
 
-    es_cites INTEGER DEFAULT 0,
+    es_cites INTEGER,
 
-    es_euring INTEGER DEFAULT 0,
+    es_euring INTEGER,
 
-    es_red_natura INTEGER DEFAULT 0,
+    es_red_natura INTEGER,
 
-    fecha_descarga TEXT
+    fecha_descarga TEXT,
+
+    ambito TEXT,
+
+    grupo_taxonomico TEXT,
+
+    especie_epiteto TEXT,
+
+    autor_taxon TEXT,
+
+    fecha_enriquecimiento TEXT
 )
-""")
+"""
 
-cur.execute("""
-CREATE INDEX IF NOT EXISTS idx_nombre
-ON especies(nombre)
-""")
 
-cur.execute("""
-CREATE INDEX IF NOT EXISTS idx_taxonid
-ON especies(taxonid)
-""")
+# ==========================================================
+# CREACIÓN
+# ==========================================================
 
-conn.commit()
-conn.close()
+def crear_tablas():
 
-print("Base creada correctamente.")
+    conn = conectar()
+
+    cur = conn.cursor()
+
+    cur.execute(
+        SQL_ESPECIES
+    )
+
+    conn.commit()
+
+    conn.close()
+
+
+# ==========================================================
+# MAIN
+# ==========================================================
+
+def main():
+
+    crear_tablas()
+
+    print()
+
+    print(
+        "Tabla especies creada."
+    )
+
+    print()
+
+
+if __name__ == "__main__":
+
+    main()
