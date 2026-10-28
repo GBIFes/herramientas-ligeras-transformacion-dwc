@@ -6,6 +6,7 @@
 
 # 3. Incluir todos los archivos de Python (en la raíz y subdirectorios)
 !*.py
+!*.exe
 
 # 4. Incluir la configuración y metadatos propios de Git y GitHub
 !.gitignore
