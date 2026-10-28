@@ -1,6 +1,6 @@
 """
 ===============================================================================
-main.py - Punto de Entrada Principal (Aplicación ScrapEIDOS)
+ScrapEIDOS.py - Punto de Entrada Principal (Aplicación ScrapEIDOS)
 ===============================================================================
 """
 
@@ -30,7 +30,6 @@ def main():
 
     canvas_window = main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
-    # Ajustar ancho del contenido al cambiar el tamaño de la ventana
     def _on_canvas_configure(event):
         main_canvas.itemconfig(canvas_window, width=event.width)
 
@@ -40,7 +39,6 @@ def main():
     main_canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
 
-    # Permitir desplazamiento con la rueda del ratón
     def _on_mousewheel(event):
         main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
@@ -101,7 +99,12 @@ def main():
             messagebox.showerror("Error", "Debes seleccionar una columna para la búsqueda.")
             return
 
-        dir_destino_final = dir_salida["path"]
+        # Leer también las modificaciones escritas a mano en el campo.
+        dir_destino_final = salida_entry.get().strip()
+        if not dir_destino_final:
+            messagebox.showerror("Error", "Selecciona un directorio de salida.")
+            return
+        dir_salida["path"] = dir_destino_final
         dir_entrada_original = os.path.dirname(ruta_csv["path"])
         if os.path.abspath(dir_destino_final) == os.path.abspath(dir_entrada_original):
             dir_destino_final = os.path.join(dir_entrada_original, "EIDOS")
@@ -115,16 +118,17 @@ def main():
 
     # --- Contenido de la Interfaz ---
     
-    # Header Informativo
     frame_desc = tk.Frame(scrollable_frame, bg="#F5F5F5", padx=15, pady=15, relief=tk.RIDGE, bd=1)
     frame_desc.pack(fill="x", padx=20, pady=15)
 
     lbl_info_texto = (
         "Extracción Completa de EIDOS (IEPNB - MITECO)\n\n"
         "ℹ️ INFORMACIÓN DE SALIDA:\n"
-        "• Se crearán los ficheros de taxones, nombres comunes, información, conservación, etc.\n"
-        "• Al exportar a Excel, la hoja principal se llamará 'taxones' y se añadirán pestañas secundarias con datos completos.\n"
-        "• Si eliges el mismo directorio que el fichero de entrada, se creará automáticamente una carpeta llamada 'EIDOS' para almacenar todos los resultados."
+        "• El panel de entrada izquierdo se muestra de forma limpia y compacta sin recuadros.\n"
+        "• El panel derecho incluye Coordenadas y Estado cartografía, con un botón Ver mapa.\n"
+        "• Las coordenadas y los polígonos se guardan automáticamente al finalizar la descarga.\n"
+        "• La exportación final incluye las coordenadas en CSV, Excel y SQLite.\n"
+        "• Los puntos representan centros de cuadrículas, no observaciones exactas."
     )
 
     lbl_desc = tk.Label(frame_desc, text=lbl_info_texto, font=("Segoe UI", 9), bg="#F5F5F5", fg="#333333", justify="left", wraplength=600)
