@@ -15,7 +15,7 @@ incluyendo EML complejos. Ofrece:
 - Selección automática del nodo encontrado
 
 Uso:
-1. Ejecutar: python EditarUnEMLxml.py
+1. Ejecutar: python EditarXML.py
 2. Abrir un XML desde el menú Archivo
 3. Usar Herramientas → Buscar / Reemplazar
 4. Navegar coincidencias desde la lista lateral
@@ -307,6 +307,36 @@ class XMLTreeEditor(tk.Tk):
             self.node_map.clear()
             self.build_tree(self.root_xml, "", 0)
 
+    def move_node_up(self):
+        if not self.current_node:
+            return
+        parent = self.find_parent(self.root_xml, self.current_node)
+        if parent is None:
+            return
+        children = list(parent)
+        idx = children.index(self.current_node)
+        if idx > 0:
+            parent.remove(self.current_node)
+            parent.insert(idx - 1, self.current_node)
+            self.treeview.delete(*self.treeview.get_children())
+            self.node_map.clear()
+            self.build_tree(self.root_xml, "", 0)
+
+    def move_node_down(self):
+        if not self.current_node:
+            return
+        parent = self.find_parent(self.root_xml, self.current_node)
+        if parent is None:
+            return
+        children = list(parent)
+        idx = children.index(self.current_node)
+        if idx < len(children) - 1:
+            parent.remove(self.current_node)
+            parent.insert(idx + 1, self.current_node)
+            self.treeview.delete(*self.treeview.get_children())
+            self.node_map.clear()
+            self.build_tree(self.root_xml, "", 0)
+
     def find_parent(self, root, target):
         for child in list(root):
             if child is target:
@@ -315,6 +345,7 @@ class XMLTreeEditor(tk.Tk):
             if res is not None:
                 return res
         return None
+
     def search_node_dialog(self):
         if not self.root_xml:
             messagebox.showwarning("Sin XML", "Primero abre un documento XML.")

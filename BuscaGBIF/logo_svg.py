@@ -1,5 +1,3 @@
-
-python
 LOGO_SVG = r"""
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Generator: Adobe Illustrator 27.3.1, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
