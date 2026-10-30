@@ -1,18 +1,7 @@
 """
 dwca_access_forms.py
 Genera en un .accdb ya creado los formularios de visualización equivalentes
-a los del visor Tkinter:
-
-    frm_core        -> campos del core (izquierda) + pestañas con las
-                       extensiones y el EML (derecha), igual que el visor
-    sub_<extensión> -> subformulario (formulario continuo) por extensión,
-                       enlazado por id con el core
-    frm_eml         -> metadatos EML (hoja de datos)
-
-Se hace por automatización COM de Access (pywin32), sin inyectar código VBA.
-Requiere Microsoft Access completo instalado (no basta el motor ACE).
-La navegación (primero / anterior / siguiente / último / ir a registro) y el
-filtrado (Filtro por formulario, clic derecho en un campo) son nativos de Access.
+a los del visor Tkinter, con manejo tolerante de errores COM de Access.
 """
 
 import win32com.client
@@ -47,8 +36,7 @@ READ_ONLY = True          # los formularios son solo de visualización
 def _create_fields_form(acc, schema, view, as_sub):
     """
     Crea un formulario con un cuadro de texto (y su etiqueta) por columna.
-    Devuelve (frm, nombre_temporal, borde_derecho). El formulario queda
-    abierto en vista Diseño para poder seguir añadiendo controles.
+    Devuelve (frm, nombre_temporal, borde_derecho).
     """
     frm = acc.CreateForm()
     tmp = frm.Name
@@ -56,20 +44,20 @@ def _create_fields_form(acc, schema, view, as_sub):
     frm.DefaultView = view
     try:
         frm.ScrollBars = 3
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     if READ_ONLY:
         for prop in ("AllowEdits", "AllowAdditions", "AllowDeletions"):
             try:
                 setattr(frm, prop, False)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
     if as_sub:
         for prop in ("NavigationButtons", "RecordSelectors"):
             try:
                 setattr(frm, prop, False)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     text_left = MARGIN + LABEL_W + 100
@@ -82,9 +70,8 @@ def _create_fields_form(acc, schema, view, as_sub):
         if memo:
             try:
                 ctl.ScrollBars = 2
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
-        # Etiqueta asociada (se crea sola junto al cuadro de texto)
         try:
             lbl = ctl.Controls.Item(0)
             lbl.Caption = caption if view == VIEW_DATASHEET else f"{caption}:"
@@ -92,17 +79,17 @@ def _create_fields_form(acc, schema, view, as_sub):
             lbl.Top = top
             lbl.Width = LABEL_W
             lbl.Height = ROW_H
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         top += h + GAP
 
     try:
         frm.Section(0).Height = top + MARGIN
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     try:
         frm.Width = text_left + TEXT_W + MARGIN
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     return frm, tmp, text_left + TEXT_W + 300
@@ -114,14 +101,9 @@ def _save_form(acc, tmp_name, final_name):
 
 
 def _add_tabs(acc, tmp, left, pages):
-    """
-    Añade al formulario abierto 'tmp' un control de pestañas.
-    pages = [(titulo, nombre_subformulario, enlazar_por_id), ...]
-    """
     tab = acc.CreateControl(tmp, AC_TABCTL, 0, "", "", left, MARGIN, TAB_W, TAB_H)
     tab.Name = "tab_ext"
 
-    # Un control de pestañas nuevo trae 2 páginas: ajustar al nº necesario
     while tab.Pages.Count < len(pages):
         acc.CreateControl(tmp, AC_PAGE, 0, tab.Name)
     while tab.Pages.Count > len(pages):
@@ -141,17 +123,22 @@ def _add_tabs(acc, tmp, left, pages):
 
 def create_forms(accdb_path, schema, eml_schema=None):
     """
-    schema      : lista de dicts (el primero es el core, el resto extensiones)
-                  con claves table, cols, captions, types, label.
+    schema      : lista de dicts con claves table, cols, captions, types, label.
     eml_schema  : dict equivalente para eml_metadata, o None.
     """
     acc = win32com.client.Dispatch("Access.Application")
     try:
-        acc.Visible = False
+        # Intentar ocultar la aplicación de forma segura si el entorno lo soporta
+        try:
+            acc.Visible = False
+        except Exception:
+            pass
+
         acc.OpenCurrentDatabase(accdb_path)
+        
         try:
             acc.DoCmd.SetWarnings(False)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
         pages = []
@@ -177,7 +164,7 @@ def create_forms(accdb_path, schema, eml_schema=None):
             _add_tabs(acc, tmp, right, pages)
             try:
                 _frm.Width = right + TAB_W + MARGIN
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         _save_form(acc, tmp, "frm_core")
 
@@ -186,17 +173,17 @@ def create_forms(accdb_path, schema, eml_schema=None):
             db = acc.CurrentDb()
             try:
                 db.Properties.Item("StartupForm").Value = "frm_core"
-            except Exception:  # noqa: BLE001
-                prop = db.CreateProperty("StartupForm", 10, "frm_core")  # dbText = 10
+            except Exception:
+                prop = db.CreateProperty("StartupForm", 10, "frm_core")
                 db.Properties.Append(prop)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     finally:
         try:
             acc.CloseCurrentDatabase()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         try:
             acc.Quit(AC_QUIT_SAVE_NONE)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass

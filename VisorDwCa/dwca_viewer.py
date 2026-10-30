@@ -1,3 +1,10 @@
+"""
+dwca_viewer.py
+==============
+Módulo principal del visor de Darwin Core Archive con paneles adaptativos,
+wrap inteligente y barras de desplazamiento vertical y horizontal.
+"""
+
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -74,27 +81,32 @@ class ViewerFrame(tk.Frame):
         self.btn_excel.pack(side="right", padx=5, pady=5)
 
         # -------------------------------
-        # PANEL PRINCIPAL
+        # PANEL PRINCIPAL (PanedWindow)
         # -------------------------------
         main = tk.PanedWindow(self, orient="horizontal")
         main.pack(fill="both", expand=True)
 
         # -------------------------------
-        # PANEL IZQUIERDO (CORE)
+        # PANEL IZQUIERDO (CORE) CON SCROLL DUAL
         # -------------------------------
-        self.left = tk.Frame(main)
-        main.add(self.left)
+        self.left_container = tk.Frame(main)
+        main.add(self.left_container)
 
-        self.left_canvas = tk.Canvas(self.left)
+        self.left_canvas = tk.Canvas(self.left_container, highlightthickness=0)
+        self.left_scroll_y = tk.Scrollbar(self.left_container, orient="vertical", command=self.left_canvas.yview)
+        self.left_scroll_x = tk.Scrollbar(self.left_container, orient="horizontal", command=self.left_canvas.xview)
+
+        self.left_canvas.configure(
+            yscrollcommand=self.left_scroll_y.set,
+            xscrollcommand=self.left_scroll_x.set
+        )
+
+        self.left_scroll_y.pack(side="right", fill="y")
+        self.left_scroll_x.pack(side="bottom", fill="x")
         self.left_canvas.pack(side="left", fill="both", expand=True)
 
-        self.left_scroll = tk.Scrollbar(self.left, orient="vertical", command=self.left_canvas.yview)
-        self.left_scroll.pack(side="right", fill="y")
-
-        self.left_canvas.configure(yscrollcommand=self.left_scroll.set)
-
         self.left_record_frame = tk.Frame(self.left_canvas)
-        self.left_canvas.create_window((0, 0), window=self.left_record_frame, anchor="nw")
+        self.left_canvas_window = self.left_canvas.create_window((0, 0), window=self.left_record_frame, anchor="nw")
 
         self.left_record_frame.bind(
             "<Configure>",
@@ -154,9 +166,6 @@ class ViewerFrame(tk.Frame):
         tk.Button(filter_frame, text="Filtrar", command=self.apply_filter_inline).pack(side="left", padx=5)
         tk.Button(filter_frame, text="Mostrar todos", command=self.clear_filter).pack(side="left", padx=5)
 
-    # ---------------------------------------------------------
-    # VINCULAR WELCOME
-    # ---------------------------------------------------------
     def set_welcome(self, welcome_frame):
         self.welcome_frame = welcome_frame
 
@@ -165,9 +174,6 @@ class ViewerFrame(tk.Frame):
             self.pack_forget()
             self.welcome_frame.pack(fill="both", expand=True)
 
-    # ---------------------------------------------------------
-    # EXPORTAR A ACCESS
-    # ---------------------------------------------------------
     def export_access(self):
         if self.model is None:
             messagebox.showwarning("Exportar a Access", "Primero abre un DwC-A.")
@@ -176,9 +182,6 @@ class ViewerFrame(tk.Frame):
         export_dwca_to_access(self.root, self.core_fields, self.core_rows,
                               self.extensions, self.ext_data, eml_path)
 
-    # ---------------------------------------------------------
-    # EXPORTAR A EXCEL
-    # ---------------------------------------------------------
     def export_excel(self):
         if self.model is None:
             messagebox.showwarning("Exportar a Excel", "Primero abre un DwC-A.")
@@ -187,17 +190,18 @@ class ViewerFrame(tk.Frame):
         export_dwca_to_excel(self.root, self.core_fields, self.core_rows,
                              self.extensions, self.ext_data, eml_path)
 
-    # ---------------------------------------------------------
-    # CARGA DE DATOS
-    # ---------------------------------------------------------
     def load(self, meta_path):
-        self.core_path = meta_path
-        self.lbl_path.config(text=f"Archivo cargado: {meta_path}")
+        self.load_with_schema(meta_path, manual_schema=None)
 
-        loader = DwcaLoader(meta_path)
-        core_fields, core_rows, extensions, ext_data = loader.load()
+    def load_with_schema(self, path, manual_schema=None):
+        self.core_path = path
+        self.lbl_path.config(text=f"Archivo cargado: {os.path.basename(path)}")
+
+        loader = DwcaLoader(path)
+        core_fields, core_rows, extensions, ext_data = loader.load(manual_schema=manual_schema)
 
         self.model = DwcaModel(core_fields, core_rows, extensions, ext_data)
+        self.model.core_id_index = getattr(loader, 'core_id_index', 0)
         self.core_fields = core_fields
         self.core_rows = core_rows
         self.extensions = extensions
@@ -211,9 +215,6 @@ class ViewerFrame(tk.Frame):
         self.load_ext_tabs()
         self.update_right_window()
 
-    # ---------------------------------------------------------
-    # PANEL IZQUIERDO (CORE)
-    # ---------------------------------------------------------
     def load_record(self):
         for w in self.left_record_frame.winfo_children():
             w.destroy()
@@ -233,10 +234,9 @@ class ViewerFrame(tk.Frame):
                 self.left_record_frame,
                 text=field + ":",
                 font=("Segoe UI", 9, "bold"),
-                anchor="nw",
-                wraplength=350
+                anchor="nw"
             )
-            lbl_field.grid(row=i, column=0, sticky="nw", padx=4, pady=0)
+            lbl_field.grid(row=i, column=0, sticky="nw", padx=6, pady=3)
 
             if is_url(val):
                 btn = tk.Button(
@@ -246,29 +246,27 @@ class ViewerFrame(tk.Frame):
                     cursor="hand2",
                     relief="flat",
                     font=("Segoe UI", 9),
-                    wraplength=350,
+                    wraplength=450,
                     justify="left",
                     command=lambda v=val: webbrowser.open(v)
                 )
-                btn.grid(row=i, column=1, sticky="nw", padx=4, pady=0)
+                btn.grid(row=i, column=1, sticky="nw", padx=6, pady=3)
             else:
+                # Wrap inteligente configurado con wraplength fijo
                 lbl_val = tk.Label(
                     self.left_record_frame,
                     text=val,
                     font=("Segoe UI", 9),
                     anchor="nw",
-                    wraplength=350,
+                    wraplength=450,
                     justify="left"
                 )
-                lbl_val.grid(row=i, column=1, sticky="nw", padx=4, pady=0)
+                lbl_val.grid(row=i, column=1, sticky="nw", padx=6, pady=3)
 
         self.left_record_frame.update_idletasks()
         self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
         self.update_nav_label()
 
-    # ---------------------------------------------------------
-    # PANEL DERECHO (EXTENSIONES)
-    # ---------------------------------------------------------
     def load_ext_tabs(self):
         for t in self.tabs.tabs():
             self.tabs.forget(t)
@@ -277,13 +275,19 @@ class ViewerFrame(tk.Frame):
             frame = tk.Frame(self.tabs)
             self.tabs.add(frame, text=name)
 
-            canvas = tk.Canvas(frame)
+            # Contenedor con scroll vertical y horizontal para cada pestaña de extensión
+            canvas = tk.Canvas(frame, highlightthickness=0)
+            scroll_y = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+            scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
+
+            canvas.configure(
+                yscrollcommand=scroll_y.set,
+                xscrollcommand=scroll_x.set
+            )
+
+            scroll_y.pack(side="right", fill="y")
+            scroll_x.pack(side="bottom", fill="x")
             canvas.pack(side="left", fill="both", expand=True)
-
-            scroll = tk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-            scroll.pack(side="right", fill="y")
-
-            canvas.configure(yscrollcommand=scroll.set)
 
             ext_frame = tk.Frame(canvas)
             canvas.create_window((0, 0), window=ext_frame, anchor="nw")
@@ -303,22 +307,43 @@ class ViewerFrame(tk.Frame):
         idx = indices[self.active_index]
         row = self.core_rows[idx]
 
-        if "id" in self.core_fields:
-            cid = row[self.core_fields.index("id")]
+        if hasattr(self.model, 'core_id_index') and self.model.core_id_index < len(row):
+            cid = str(row[self.model.core_id_index]).strip()
+        elif "id" in self.core_fields:
+            cid = str(row[self.core_fields.index("id")]).strip()
         else:
-            cid = row[0]
+            cid = str(row[0]).strip()
 
         for i, (name, fields) in enumerate(self.extensions):
+            if i >= len(self.tabs.tabs()):
+                continue
+
             frame = self.tabs.nametowidget(self.tabs.tabs()[i])
-            ext_frame = frame.ext_frame
+            ext_frame = getattr(frame, 'ext_frame', frame)
 
             for w in ext_frame.winfo_children():
                 w.destroy()
 
             rows = self.ext_data.get(name, {}).get(cid, [])
 
+            if not rows:
+                lbl_empty = tk.Label(
+                    ext_frame,
+                    text="(Sin registros asociados)",
+                    font=("Segoe UI", 9, "italic"),
+                    fg="#666666"
+                )
+                lbl_empty.pack(padx=10, pady=10)
+                continue
+
             r_index = 0
             for r in rows:
+                if r_index > 0:
+                    ttk.Separator(ext_frame, orient="horizontal").grid(
+                        row=r_index, column=0, columnspan=2, sticky="ew", pady=6
+                    )
+                    r_index += 1
+
                 for j, field in enumerate(fields):
                     val = r[j] if j < len(r) else ""
 
@@ -326,26 +351,23 @@ class ViewerFrame(tk.Frame):
                         ext_frame,
                         text=field + ":",
                         font=("Segoe UI", 9, "bold"),
-                        anchor="nw",
-                        wraplength=350
+                        anchor="nw"
                     )
-                    lbl_field.grid(row=r_index, column=0, sticky="nw", padx=4, pady=0)
+                    lbl_field.grid(row=r_index, column=0, sticky="nw", padx=6, pady=2)
 
+                    # Wrap inteligente aplicado a los campos de los brazos de la estrella
                     lbl_val = tk.Label(
                         ext_frame,
                         text=str(val),
                         font=("Segoe UI", 9),
                         anchor="nw",
-                        wraplength=350,
+                        wraplength=450,
                         justify="left"
                     )
-                    lbl_val.grid(row=r_index, column=1, sticky="nw", padx=4, pady=0)
+                    lbl_val.grid(row=r_index, column=1, sticky="nw", padx=6, pady=2)
 
                     r_index += 1
 
-    # ---------------------------------------------------------
-    # NAVEGACIÓN
-    # ---------------------------------------------------------
     def update_nav_label(self):
         indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
         if not indices:
@@ -396,9 +418,6 @@ class ViewerFrame(tk.Frame):
         self.load_record()
         self.update_right_window()
 
-    # ---------------------------------------------------------
-    # FILTRADO
-    # ---------------------------------------------------------
     def apply_filter_inline(self):
         field = self.filter_field_var.get()
         value = self.filter_value_entry.get()
