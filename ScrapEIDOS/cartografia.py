@@ -27,37 +27,55 @@ def extraer_id(valor):
 
 
 def recopilar_coordenadas(identificadores, progreso=None):
-    """Consulta IDs únicos; un fallo no impide guardar los demás taxones.
-
-    Si una página o una geometría falla, no publica datos parciales del taxón.
-    Los errores se diferencian expresamente de «sin distribución».
-    """
-    filas, features, estados = [], [], []
     ids = list(dict.fromkeys(str(i).strip() for i in identificadores if str(i).strip()))
+    
+    def procesar_lote(lista_ids):
+        filas_lote, features_lote, estados_lote = [], [], []
+        with crear_sesion_robusta() as session:
+            for valor in lista_ids:
+                try:
+                    e_id = extraer_id(valor)
+                    f_taxon, ft_taxon = [], []
+                    for feature in consultar(session, e_id):
+                        lat, lon = centro_wgs84(feature["geometry"])
+                        utm = feature["properties"]["cuadricula"]
+                        f_taxon.append([e_id, utm, round(lat, 8), round(lon, 8)])
+                        ft_taxon.append({
+                            "type": "Feature",
+                            "geometry": feature["geometry"],
+                            "properties": {"taxonId": e_id, "utm": utm},
+                        })
+                    filas_lote.extend(f_taxon)
+                    features_lote.extend(ft_taxon)
+                    estados_lote.append([
+                        e_id, "ok" if f_taxon else "sin_distribucion",
+                        len(f_taxon), "",
+                    ])
+                except Exception as exc:
+                    estados_lote.append([valor, "error", 0, str(exc)])
+        return filas_lote, features_lote, estados_lote
+
+    filas, features, estados = [], [], []
+    total = len(ids)
+    
     with crear_sesion_robusta() as session:
         for numero, valor in enumerate(ids, 1):
-            try:
-                e_id = extraer_id(valor)
-                filas_taxon, features_taxon = [], []
-                for feature in consultar(session, e_id):
-                    lat, lon = centro_wgs84(feature["geometry"])
-                    utm = feature["properties"]["cuadricula"]
-                    filas_taxon.append([e_id, utm, round(lat, 8), round(lon, 8)])
-                    features_taxon.append({
-                        "type": "Feature",
-                        "geometry": feature["geometry"],
-                        "properties": {"taxonId": e_id, "utm": utm},
-                    })
-                filas.extend(filas_taxon)
-                features.extend(features_taxon)
-                estados.append([
-                    e_id, "ok" if filas_taxon else "sin_distribucion",
-                    len(filas_taxon), "",
-                ])
-            except Exception as exc:
-                estados.append([valor, "error", 0, str(exc)])
+            f_lote, ft_lote, est_lote = procesar_lote([valor])
+            filas.extend(f_lote)
+            features.extend(ft_lote)
+            estados.extend(est_lote)
             if progreso:
-                progreso(numero, len(ids))
+                progreso(numero, total)
+
+    errores_iniciales = [row[0] for row in estados if row[1] == "error"]
+    if errores_iniciales:
+        estados = [row for row in estados if row[1] != "error"]
+        for valor in errores_iniciales:
+            f_lote, ft_lote, est_lote = procesar_lote([valor])
+            filas.extend(f_lote)
+            features.extend(ft_lote)
+            estados.extend(est_lote)
+
     return (
         pd.DataFrame(filas, columns=COLUMNAS_COORD),
         {"type": "FeatureCollection", "features": features},
@@ -78,7 +96,6 @@ def _reemplazar_atomico(ruta, escribir):
 
 
 def guardar_cartografia(df_coord, geojson, df_estado, directorio, nombre_base):
-    """Persiste incluso tablas vacías, con cabeceras y estado de consulta."""
     Path(directorio).mkdir(parents=True, exist_ok=True)
     rutas = {
         "csv": Path(directorio) / f"{nombre_base}_Coordenadas.csv",
@@ -91,7 +108,6 @@ def guardar_cartografia(df_coord, geojson, df_estado, directorio, nombre_base):
     _reemplazar_atomico(
         rutas["estado"], lambda out: df_estado.to_csv(out, sep=";", index=False)
     )
-    # GeoJSON sin BOM para máxima compatibilidad con lectores JSON.
     fd, tmp = tempfile.mkstemp(dir=directorio, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:
@@ -104,7 +120,6 @@ def guardar_cartografia(df_coord, geojson, df_estado, directorio, nombre_base):
 
 
 def generar_mapa(e_id, nombre, df_coord, geojson, ruta):
-    """Genera HTML local con Folium/Leaflet, sin subir datos a un servidor."""
     import folium
 
     e_id = extraer_id(e_id)
@@ -168,7 +183,6 @@ def generar_mapa(e_id, nombre, df_coord, geojson, ruta):
 
 
 def abrir_mapa(ruta, titulo):
-    """Webview nativa en otro proceso; si no está instalada, navegador."""
     import importlib.util
 
     ruta = Path(ruta).resolve()
@@ -183,7 +197,6 @@ def abrir_mapa(ruta, titulo):
 
 
 if __name__ == "__main__":
-    # pywebview necesita su propio hilo principal, separado del bucle de Tk.
     ruta = Path(sys.argv[1]).resolve()
     try:
         import webview

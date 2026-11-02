@@ -15,8 +15,8 @@ from gui import ejecutar_scraping, abrir_visor_access
 def main():
     root = tk.Tk()
     root.title("Extracción Completa EIDOS - IEPNB")
-    root.geometry("700x850")
-    root.minsize(650, 700)
+    root.geometry("750x740")
+    root.minsize(680, 650)
 
     # --- Estructura con Barra de Desplazamiento (Scrollbar) Global ---
     main_canvas = tk.Canvas(root, borderwidth=0, highlightthickness=0)
@@ -48,6 +48,14 @@ def main():
     ruta_csv = {"path": None}
     dir_salida = {"path": None}
 
+    def actualizar_estado_boton():
+        col_i = combo_id.get().strip()
+        col_n = combo_nombre.get().strip()
+        if ruta_csv["path"] and (col_i or col_n):
+            btn_run.config(state=tk.NORMAL, bg="#4CAF50")
+        else:
+            btn_run.config(state=tk.DISABLED, bg="#CCCCCC")
+
     # --- Funciones de Interfaz ---
     def seleccionar_csv():
         f = filedialog.askopenfilename(
@@ -69,12 +77,21 @@ def main():
             dialect = detectar_dialect(f)
             df_temp = pd.read_csv(f, sep=dialect.delimiter, nrows=0, encoding=encoding, engine="python")
             columnas = list(df_temp.columns)
-            combo_columna['values'] = columnas
+            
+            combo_id['values'] = ["(Ninguna)"] + columnas
+            combo_nombre['values'] = ["(Ninguna)"] + columnas
+            
+            combo_id.set("(Ninguna)")
+            combo_nombre.set("(Ninguna)")
+
             for col in columnas:
-                if "taxon" in col.lower() or "eidos" in col.lower() or "id" in col.lower():
-                    combo_columna.set(col)
-            if not combo_columna.get() and columnas:
-                combo_columna.set(columnas[0])
+                lcol = col.lower()
+                if "eidos" in lcol or "id" in lcol:
+                    combo_id.set(col)
+                elif "taxon" in lcol or "scientific" in lcol or "nombre" in lcol:
+                    combo_nombre.set(col)
+
+            actualizar_estado_boton()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron leer las columnas:\n{e}")
 
@@ -93,13 +110,16 @@ def main():
             messagebox.showerror("Error", "Selecciona un directorio de salida.")
             return
         
-        col_sel = combo_columna.get()
-        tipo_b = modo_busqueda.get()
-        if not col_sel:
-            messagebox.showerror("Error", "Debes seleccionar una columna para la búsqueda.")
+        col_i = combo_id.get().strip()
+        col_n = combo_nombre.get().strip()
+        
+        if col_i == "(Ninguna)": col_i = ""
+        if col_n == "(Ninguna)": col_n = ""
+
+        if not col_i and not col_n:
+            messagebox.showerror("Error", "Debes seleccionar al menos una columna (EIDOS_ID o Nombre Científico).")
             return
 
-        # Leer también las modificaciones escritas a mano en el campo.
         dir_destino_final = salida_entry.get().strip()
         if not dir_destino_final:
             messagebox.showerror("Error", "Selecciona un directorio de salida.")
@@ -109,81 +129,113 @@ def main():
         if os.path.abspath(dir_destino_final) == os.path.abspath(dir_entrada_original):
             dir_destino_final = os.path.join(dir_entrada_original, "EIDOS")
 
-        global btn_run
         btn_run.config(state=tk.DISABLED)
+        
+        incluir_cartografia = var_carto.get()
+        nivel_prec = combo_precision.get()
+        
         ejecutar_scraping(
-            ruta_csv["path"], dir_destino_final, col_sel, tipo_b, 
-            root, progress_bar, lbl_progreso, btn_run, abrir_visor_access
+            ruta_csv["path"], dir_destino_final, col_i, col_n, 
+            root, progress_bar, lbl_progreso, btn_run, abrir_visor_access,
+            incluir_cartografia=incluir_cartografia, nivel_precision=nivel_prec
         )
 
-    # --- Contenido de la Interfaz ---
+    # --- Contenido de la Pantalla de Bienvenida y Configuración (Compacta) ---
     
-    frame_desc = tk.Frame(scrollable_frame, bg="#F5F5F5", padx=15, pady=15, relief=tk.RIDGE, bd=1)
-    frame_desc.pack(fill="x", padx=20, pady=15)
+    frame_desc = tk.Frame(scrollable_frame, bg="#F5F5F5", padx=10, pady=8, relief=tk.RIDGE, bd=1)
+    frame_desc.pack(fill="x", padx=15, pady=8)
 
     lbl_info_texto = (
-        "Extracción Completa de EIDOS (IEPNB - MITECO)\n\n"
-        "ℹ️ INFORMACIÓN DE SALIDA:\n"
-        "• El panel de entrada izquierdo se muestra de forma limpia y compacta sin recuadros.\n"
-        "• El panel derecho incluye Coordenadas y Estado cartografía, con un botón Ver mapa.\n"
-        "• Las coordenadas y los polígonos se guardan automáticamente al finalizar la descarga.\n"
-        "• La exportación final incluye las coordenadas en CSV, Excel y SQLite.\n"
-        "• Los puntos representan centros de cuadrículas, no observaciones exactas."
+        "🎯 PROPÓSITO: Extracción automatizada de fichas, taxonomía, conservación y mapas de EIDOS (IEPNB - MITECO).\n"
+        "📂 ENTRADA: Archivo CSV/TSV/TXT con identificadores o nombres científicos.\n"
+        "📦 SALIDA: CSVs categorizados, libros Excel (.xlsx), bases SQLite (.db), GeoJSON y mapas Leaflet."
     )
 
-    lbl_desc = tk.Label(frame_desc, text=lbl_info_texto, font=("Segoe UI", 9), bg="#F5F5F5", fg="#333333", justify="left", wraplength=600)
+    lbl_desc = tk.Label(frame_desc, text=lbl_info_texto, font=("Segoe UI", 9), bg="#F5F5F5", fg="#333333", justify="left", wraplength=640)
     lbl_desc.pack(anchor="w")
 
-    # Selección de Archivo Entrada
-    frame_archivo = tk.LabelFrame(scrollable_frame, text=" Archivo de Entrada ", font=("Segoe UI", 10, "bold"), padx=15, pady=10)
-    frame_archivo.pack(fill="x", padx=20, pady=10)
+    # 1. Archivo de Entrada
+    frame_archivo = tk.Frame(scrollable_frame, padx=10, pady=2)
+    frame_archivo.pack(fill="x", padx=15, pady=2)
 
-    btn_sel_csv = tk.Button(frame_archivo, text="📁 Seleccionar archivo CSV / TXT", command=seleccionar_csv, bg="#2196F3", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=4)
-    btn_sel_csv.pack(anchor="w", pady=5)
+    btn_sel_csv = tk.Button(frame_archivo, text="📁 Archivo Entrada", command=seleccionar_csv, bg="#2196F3", fg="white", font=("Segoe UI", 9, "bold"), padx=6, pady=2)
+    btn_sel_csv.pack(side="left", padx=(0, 10))
 
-    label_csv = tk.Label(frame_archivo, text="(ningún archivo seleccionado)", font=("Segoe UI", 9, "italic"), fg="#666666", wraplength=600, justify="left")
-    label_csv.pack(anchor="w", pady=2)
+    label_csv = tk.Label(frame_archivo, text="(ningún archivo seleccionado)", font=("Segoe UI", 9, "italic"), fg="#666666")
+    label_csv.pack(side="left", anchor="w")
 
-    # Criterio de Búsqueda
-    frame_modo = tk.LabelFrame(scrollable_frame, text=" Criterio de Búsqueda ", font=("Segoe UI", 10, "bold"), padx=15, pady=10)
-    frame_modo.pack(fill="x", padx=20, pady=10)
+    # 2. Criterio de Búsqueda (Dos selectores de columna)
+    frame_criterio = tk.LabelFrame(scrollable_frame, text=" 2. Columnas de Búsqueda (EIDOS_ID y Nombre Científico) ", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
+    frame_criterio.pack(fill="x", padx=15, pady=5)
 
-    modo_busqueda = tk.StringVar(value="id")
-    tk.Radiobutton(frame_modo, text="Buscar por Identificador (EIDOS_ID / taxonID)", variable=modo_busqueda, value="id", font=("Segoe UI", 9)).pack(anchor="w", pady=3)
-    tk.Radiobutton(frame_modo, text="Buscar por Nombre Científico (vía search_api_fulltext)", variable=modo_busqueda, value="name", font=("Segoe UI", 9)).pack(anchor="w", pady=3)
+    f_sel1 = tk.Frame(frame_criterio)
+    f_sel1.pack(fill="x", pady=2)
+    tk.Label(f_sel1, text="Columna EIDOS_ID:", font=("Segoe UI", 9, "bold"), width=18, anchor="w").pack(side="left")
+    combo_id = ttk.Combobox(f_sel1, state="readonly", width=35, font=("Segoe UI", 9))
+    combo_id.pack(side="left", padx=5)
+    combo_id.bind("<<ComboboxSelected>>", lambda e: actualizar_estado_boton())
 
-    # Selección de Columna
-    frame_cols = tk.LabelFrame(scrollable_frame, text=" Columna a utilizar ", font=("Segoe UI", 10, "bold"), padx=15, pady=10)
-    frame_cols.pack(fill="x", padx=20, pady=10)
+    f_sel2 = tk.Frame(frame_criterio)
+    f_sel2.pack(fill="x", pady=2)
+    tk.Label(f_sel2, text="Col. Nombre Científ.:", font=("Segoe UI", 9, "bold"), width=18, anchor="w").pack(side="left")
+    combo_nombre = ttk.Combobox(f_sel2, state="readonly", width=35, font=("Segoe UI", 9))
+    combo_nombre.pack(side="left", padx=5)
+    combo_nombre.bind("<<ComboboxSelected>>", lambda e: actualizar_estado_boton())
 
-    tk.Label(frame_cols, text="Selecciona la columna que contiene los criterios de búsqueda:", font=("Segoe UI", 9)).pack(anchor="w", pady=2)
-    combo_columna = ttk.Combobox(frame_cols, state="readonly", width=50, font=("Segoe UI", 9))
-    combo_columna.pack(anchor="w", pady=5)
+    tk.Label(frame_criterio, text="💡 Nota: Si selecciona ambas, se priorizará EIDOS_ID; si está vacío, se buscará por Nombre Científico.", font=("Segoe UI", 8, "italic"), fg="#555555").pack(anchor="w", pady=(4, 2))
 
-    # Directoria de Salida
-    frame_salida = tk.LabelFrame(scrollable_frame, text=" Directoria de Salida ", font=("Segoe UI", 10, "bold"), padx=15, pady=10)
-    frame_salida.pack(fill="x", padx=20, pady=10)
+    # 3. Scraping de Datos Geográficos y Precisión
+    frame_geo = tk.LabelFrame(scrollable_frame, text=" 3. Datos Geográficos y Mapas ", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
+    frame_geo.pack(fill="x", padx=15, pady=5)
 
-    salida_entry = tk.Entry(frame_salida, width=55, font=("Segoe UI", 9))
-    salida_entry.pack(side="left", padx=(0, 10), pady=5, fill="x", expand=True)
+    var_carto = tk.BooleanVar(value=True)
+    chk_carto = tk.Checkbutton(
+        frame_geo, 
+        text="Incluir mapas y descarga cartográfica WFS (⚠️ Advertencia: Aumenta el tiempo de descarga)", 
+        variable=var_carto, 
+        font=("Segoe UI", 9, "bold"),
+        fg="#D32F2F"
+    )
+    chk_carto.pack(anchor="w", pady=2)
 
-    btn_sel_dir = tk.Button(frame_salida, text="Buscar...", command=seleccionar_directorio, font=("Segoe UI", 9))
-    btn_sel_dir.pack(side="right", pady=5)
+    frame_prec = tk.Frame(frame_geo)
+    frame_prec.pack(fill="x", pady=(4, 2))
+    tk.Label(frame_prec, text="Precisión WFS:", font=("Segoe UI", 9)).pack(side="left", padx=(0, 5))
+    
+    combo_precision = ttk.Combobox(frame_prec, state="readonly", width=42, font=("Segoe UI", 9))
+    combo_precision['values'] = [
+        "Estándar (Paginación 1000 - Recomendado)",
+        "Alta densidad (Reintentos exhaustivos)",
+        "Rápido (Sin reintentos)"
+    ]
+    combo_precision.set("Estándar (Paginación 1000 - Recomendado)")
+    combo_precision.pack(side="left", padx=(0, 10))
+
+    # 4. Directorio de Salida
+    frame_salida = tk.Frame(scrollable_frame, padx=10, pady=2)
+    frame_salida.pack(fill="x", padx=15, pady=5)
+
+    tk.Label(frame_salida, text="Salida:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 5))
+    salida_entry = tk.Entry(frame_salida, width=45, font=("Segoe UI", 9))
+    salida_entry.pack(side="left", padx=(0, 5), fill="x", expand=True)
+
+    btn_sel_dir = tk.Button(frame_salida, text="Explorar...", command=seleccionar_directorio, font=("Segoe UI", 9))
+    btn_sel_dir.pack(side="left")
 
     # Estado y Barra de Progreso
-    frame_progreso = tk.LabelFrame(scrollable_frame, text=" Progreso de la Extracción ", font=("Segoe UI", 10, "bold"), padx=15, pady=10)
-    frame_progreso.pack(fill="x", padx=20, pady=10)
+    frame_progreso = tk.Frame(scrollable_frame, padx=10, pady=2)
+    frame_progreso.pack(fill="x", padx=15, pady=2)
 
     lbl_progreso = tk.Label(frame_progreso, text="Esperando inicio...", font=("Segoe UI", 9))
-    lbl_progreso.pack(anchor="w", pady=4)
+    lbl_progreso.pack(anchor="w", pady=1)
 
     progress_bar = ttk.Progressbar(frame_progreso, orient="horizontal", mode="determinate")
-    progress_bar.pack(fill="x", pady=5)
+    progress_bar.pack(fill="x", pady=2)
 
-    # Botón Principal
+    # Botón Principal (Inicia deshabilitado hasta que haya archivo y al menos una columna seleccionada)
     global btn_run
-    btn_run = tk.Button(scrollable_frame, text="🚀 Iniciar Scraping", command=ejecutar, bg="#4CAF50", fg="white", font=("Segoe UI", 11, "bold"), height=2, width=25)
-    btn_run.pack(pady=20)
+    btn_run = tk.Button(scrollable_frame, text="🚀 Iniciar Scraping", command=ejecutar, bg="#CCCCCC", fg="white", font=("Segoe UI", 10, "bold"), height=1, width=22, state=tk.DISABLED)
+    btn_run.pack(pady=10)
 
     root.mainloop()
 

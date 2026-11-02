@@ -25,8 +25,10 @@ def crear_sesion_robusta():
     """Crea una sesión HTTP con reintentos automáticos y cabeceras estándar."""
     session = requests.Session()
     retries = Retry(
-        total=3,
-        backoff_factor=0.5,
+        total=4,
+        connect=3,
+        read=3,
+        backoff_factor=0.6,
         status_forcelist=[429, 500, 502, 503, 504],
         raise_on_status=False
     )

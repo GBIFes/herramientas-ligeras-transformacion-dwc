@@ -186,7 +186,7 @@ def extraer_ficha_completa(session, url, eidos_id):
     bibliografia_filas = [[eidos_id, taxon_id_uri] + fila for fila in bib_bruto]
     headers_bib_full = ["EIDOS_ID", "taxonId"] + h_bib
 
-    # 6. Sinonimia (Búsqueda real por Nombre_Sinonimo)
+    # 6. Sinonimia
     sinonimia = []
     div_sinonimos = soup.find("div", id="sinonimos") or soup.find("div", id="sinonimia") or soup.find("div", class_="wrapper-sinonimo")
     if not div_sinonimos:
@@ -230,31 +230,40 @@ def extraer_ficha_completa(session, url, eidos_id):
         "sinonimia": sinonimia
     }
 
-def procesar_fila(row, col_busqueda, tipo_busqueda):
-    val_columna = str(row.get(col_busqueda, "")).strip()
-    if not val_columna:
+def procesar_fila(row, col_id, col_nombre):
+    val_id = str(row.get(col_id, "")).strip() if col_id else ""
+    val_nombre = str(row.get(col_nombre, "")).strip() if col_nombre else ""
+
+    if not val_id and not val_nombre:
         return None, ""
 
     with crear_sesion_robusta() as session:
         eidos_id_reg = ""
-        scientific_name_reg = str(row.get("verbatimScientificName", ""))
-        if tipo_busqueda == "id":
-            # Admite tanto números como las URI taxonId generadas por la app.
-            eidos_id_reg = extraer_id(val_columna)
-            ficha_url = f"{BASE_URL}/{eidos_id_reg}"
-        else:
-            scientific_name_reg = val_columna
-            ficha_url, eidos_id_reg = obtener_url_y_id_por_busqueda_texto(session, val_columna)
+        ficha_url = ""
+        scientific_name_reg = val_nombre
+
+        if val_id:
+            try:
+                eidos_id_reg = extraer_id(val_id)
+                ficha_url = f"{BASE_URL}/{eidos_id_reg}"
+            except:
+                pass
+
+        if not ficha_url and val_nombre:
+            ficha_url, eidos_id_reg = obtener_url_y_id_por_busqueda_texto(session, val_nombre)
 
         if not eidos_id_reg and ficha_url:
             match = re.search(r'/eidos/(\d+)', ficha_url)
             if match:
                 eidos_id_reg = match.group(1)
-        if not ficha_url:
-            return None, eidos_id_reg
+
+        if not ficha_url or not eidos_id_reg:
+            return None, ""
+
         datos_ficha = extraer_ficha_completa(session, ficha_url, eidos_id_reg)
         if not datos_ficha:
             return None, eidos_id_reg
+
         scientific_name_reg = scientific_name_reg or datos_ficha["info"].get("scientificName", "")
         datos_ficha["nombres"] = [
             [item[0], item[1], scientific_name_reg, item[2], item[3], item[4]]

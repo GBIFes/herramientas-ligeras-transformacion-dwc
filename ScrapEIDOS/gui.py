@@ -21,7 +21,7 @@ from cartografia import (
     guardar_cartografia, generar_mapa, abrir_mapa,
 )
 
-def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_window, progress_bar, lbl_progreso, btn_ejecutar, callback_fin):
+def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_window, progress_bar, lbl_progreso, btn_ejecutar, callback_fin, incluir_cartografia=True, nivel_precision="Estándar (Paginación normal - Recomendado)"):
     def proceso():
         encoding = detectar_codificacion(ruta_csv)
         dialect = detectar_dialect(ruta_csv)
@@ -39,7 +39,6 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         if "taxonId" not in df.columns:
             df["taxonId"] = ""
 
-        # Mantener la columna original; no renombrar IDs a nombres científicos.
         if col_busqueda not in df.columns:
             root_window.after(0, lambda: messagebox.showerror("Error", "La columna seleccionada no existe."))
             root_window.after(0, lambda: btn_ejecutar.config(state=tk.NORMAL))
@@ -52,49 +51,62 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         lista_nombres, lista_info, lista_cons, lista_col, lista_legal, lista_bib, lista_sin = [], [], [], [], [], [], []
         headers_cons_guardado, headers_col_guardado, headers_legal_guardado, headers_bib_guardado = [], [], [], []
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_idx = {
-                executor.submit(procesar_fila, row, col_busqueda, tipo_busqueda): idx
-                for idx, row in df.iterrows()
-            }
+        filas_pendientes = list(df.iterrows())
 
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    res, e_id = future.result()
-                    if e_id:
-                        df.at[idx, "EIDOS_ID"] = e_id
-                        df.at[idx, "taxonId"] = f"{BASE_URL}/{e_id}"
-                    if res:
-                        if res["info"]: lista_info.append(res["info"])
-                        if res["nombres"]: lista_nombres.extend(res["nombres"])
-                        if res["conservacion"]: 
-                            lista_cons.extend(res["conservacion"])
-                            if not headers_cons_guardado and res.get("headers_cons"):
-                                headers_cons_guardado = res["headers_cons"]
-                        if res["colecciones"]: 
-                            lista_col.extend(res["colecciones"])
-                            if not headers_col_guardado and res.get("headers_col"):
-                                headers_col_guardado = res["headers_col"]
-                        if res["legal"]: 
-                            lista_legal.extend(res["legal"])
-                            if not headers_legal_guardado and res.get("headers_legal"):
-                                headers_legal_guardado = res["headers_legal"]
-                        if res["bibliografia"]: 
-                            lista_bib.extend(res["bibliografia"])
-                            if not headers_bib_guardado and res.get("headers_bib"):
-                                headers_bib_guardado = res["headers_bib"]
-                        if res["sinonimia"]: lista_sin.extend(res["sinonimia"])
-                except Exception as exc:
-                    print(f"Error al procesar fila {idx}: {exc}")
+        for intento in range(2):
+            if not filas_pendientes:
+                break
+            if intento > 0:
+                root_window.after(0, lambda: lbl_progreso.config(text=f"Reintentando {len(filas_pendientes)} registros pendientes..."))
 
-                completados[0] += 1
-                prog = completados[0]
-                por = int((prog / total_filas) * 100)
-                root_window.after(0, lambda p=prog, tf=total_filas, p_ct=por: [
-                    progress_bar.config(value=p),
-                    lbl_progreso.config(text=f"Procesando registros: {p}/{tf} ({p_ct}%)")
-                ])
+            futures_map = {}
+            max_w = 8 if intento == 0 else 1
+            with ThreadPoolExecutor(max_workers=max_w) as executor:
+                for idx, row in filas_pendientes:
+                    futures_map[executor.submit(procesar_fila, row, col_busqueda, tipo_busqueda)] = (idx, row)
+
+                filas_pendientes = []
+                for future in as_completed(futures_map):
+                    idx, row = futures_map[future]
+                    try:
+                        res, e_id = future.result()
+                        if res or e_id:
+                            if e_id:
+                                df.at[idx, "EIDOS_ID"] = e_id
+                                df.at[idx, "taxonId"] = f"{BASE_URL}/{e_id}"
+                            if res:
+                                if res["info"]: lista_info.append(res["info"])
+                                if res["nombres"]: lista_nombres.extend(res["nombres"])
+                                if res["conservacion"]: 
+                                    lista_cons.extend(res["conservacion"])
+                                    if not headers_cons_guardado and res.get("headers_cons"):
+                                        headers_cons_guardado = res["headers_cons"]
+                                if res["colecciones"]: 
+                                    lista_col.extend(res["colecciones"])
+                                    if not headers_col_guardado and res.get("headers_col"):
+                                        headers_col_guardado = res["headers_col"]
+                                if res["legal"]: 
+                                    lista_legal.extend(res["legal"])
+                                    if not headers_legal_guardado and res.get("headers_legal"):
+                                        headers_legal_guardado = res["headers_legal"]
+                                if res["bibliografia"]: 
+                                    lista_bib.extend(res["bibliografia"])
+                                    if not headers_bib_guardado and res.get("headers_bib"):
+                                        headers_bib_guardado = res["headers_bib"]
+                                if res["sinonimia"]: lista_sin.extend(res["sinonimia"])
+                        else:
+                            filas_pendientes.append((idx, row))
+                    except Exception as exc:
+                        print(f"Error en fila {idx} (intento {intento+1}): {exc}")
+                        filas_pendientes.append((idx, row))
+
+                    completados[0] += 1
+                    prog = min(completados[0], total_filas)
+                    por = int((prog / total_filas) * 100)
+                    root_window.after(0, lambda p=prog, tf=total_filas, p_ct=por: [
+                        progress_bar.config(value=p),
+                        lbl_progreso.config(text=f"Procesando registros: {p}/{tf} ({p_ct}%)")
+                    ])
 
         def crear_df_seguro(lista_datos, cabeceras_guardadas):
             if not lista_datos:
@@ -107,34 +119,31 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
             except Exception:
                 return pd.DataFrame(lista_datos)
 
-        # Segunda fase en el hilo de trabajo: también consulta IDs cuya ficha
-        # HTML haya fallado. No depende de abrir la pestaña ni el mapa.
-        root_window.after(0, lambda: lbl_progreso.config(text="Descargando cartografía WFS..."))
-        def progreso_carto(n, total):
-            root_window.after(0, lambda n=n, total=total: [
-                progress_bar.config(maximum=max(total, 1), value=n),
-                lbl_progreso.config(text=f"Cartografía: {n}/{total} taxones"),
-            ])
-        df_coord_mem, geojson_mem, df_estado_mem = recopilar_coordenadas(
-            df["EIDOS_ID"].tolist(), progreso_carto
-        )
-        nombre_base = os.path.splitext(os.path.basename(ruta_csv))[0]
-        try:
-            guardar_cartografia(
-                df_coord_mem, geojson_mem, df_estado_mem, dir_salida, nombre_base
+        df_coord_mem = pd.DataFrame(columns=COLUMNAS_COORD)
+        geojson_mem = {"type": "FeatureCollection", "features": []}
+        df_estado_mem = pd.DataFrame(columns=COLUMNAS_ESTADO)
+
+        if incluir_cartografia:
+            root_window.after(0, lambda: lbl_progreso.config(text="Descargando cartografía WFS..."))
+            def progreso_carto(n, total):
+                root_window.after(0, lambda n=n, total=total: [
+                    progress_bar.config(maximum=max(total, 1), value=n),
+                    lbl_progreso.config(text=f"Cartografía: {n}/{total} taxones"),
+                ])
+            
+            df_coord_mem, geojson_mem, df_estado_mem = recopilar_coordenadas(
+                df["EIDOS_ID"].tolist(), progreso_carto
             )
-        except Exception as exc:
-            root_window.after(0, lambda error=str(exc): messagebox.showwarning(
-                "Cartografía sin guardar",
-                f"Los datos siguen en memoria. Intenta exportarlos desde el visor.\n{error}",
-            ))
-        errores_carto = int((df_estado_mem["estado"] == "error").sum())
-        if errores_carto:
-            root_window.after(0, lambda n=errores_carto: messagebox.showwarning(
-                "Aviso de cartografía",
-                f"Falló la consulta WFS de {n} taxones. Consulta la pestaña "
-                "'Estado cartografía' y el CSV de estado. No son ausencias confirmadas.",
-            ))
+            nombre_base = os.path.splitext(os.path.basename(ruta_csv))[0]
+            try:
+                guardar_cartografia(
+                    df_coord_mem, geojson_mem, df_estado_mem, dir_salida, nombre_base
+                )
+            except Exception as exc:
+                root_window.after(0, lambda error=str(exc): messagebox.showwarning(
+                    "Cartografía sin guardar",
+                    f"Los datos siguen en memoria. Intenta exportarlos desde el visor.\n{error}",
+                ))
 
         df_taxones_mem = df
         df_nombres_mem = pd.DataFrame(lista_nombres, columns=["EIDOS_ID", "taxonId", "scientificName", "idioma", "pais", "nombre"])
@@ -163,6 +172,9 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
     df_coord = df_coord if df_coord is not None else pd.DataFrame(columns=COLUMNAS_COORD)
     df_estado = df_estado if df_estado is not None else pd.DataFrame(columns=COLUMNAS_ESTADO)
     geojson = geojson if geojson is not None else {"type": "FeatureCollection", "features": []}
+    
+    hay_cartografia = not df_coord.empty or not df_estado.empty
+
     visor = tk.Toplevel(root_main)
     visor.title("Visor Ampliado - Estilo Formulario Access")
     ancho = min(1400, max(1000, visor.winfo_screenwidth() - 60))
@@ -177,7 +189,6 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
     frame_main = tk.Frame(visor)
     frame_main.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # 1. Panel Izquierdo (Entrada: Compacto y sin recuadros)
     frame_left = tk.LabelFrame(frame_main, text=" Ficha de Especie (Entrada) ", font=("Segoe UI", 10, "bold"), padx=10, pady=10, width=350, bg="white")
     frame_left.pack(side="left", fill="both", expand=False, padx=5)
     frame_left.pack_propagate(False)
@@ -205,8 +216,7 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
         lbl_v.pack(side="top", fill="x", expand=True, anchor="w", pady=(0, 4))
         labels_left_values[col] = lbl_v
 
-    # 2. Panel Derecho (Datos EIDOS: Visor con Wrap Inteligente en Lienzo/Pestañas)
-    frame_right = tk.LabelFrame(frame_main, text=" Datos Extraídos de EIDOS (Wrap Inteligente) ", font=("Segoe UI", 10, "bold"), padx=5, pady=5)
+    frame_right = tk.LabelFrame(frame_main, text=" Datos Extraídos de EIDOS ", font=("Segoe UI", 10, "bold"), padx=5, pady=5)
     frame_right.pack(side="right", fill="both", expand=True, padx=5)
 
     barra_carto = ttk.Frame(frame_right)
@@ -235,11 +245,11 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
             )
             modo = abrir_mapa(ruta, f"Distribución EIDOS: {nombre or e_id}")
             if modo == "navegador":
-                lbl_carto.config(text="Mapa abierto en el navegador. Instala pywebview para una ventana independiente.")
+                lbl_carto.config(text="Mapa abierto en el navegador.")
         except Exception as exc:
             messagebox.showerror("Mapa no disponible", str(exc), parent=visor)
 
-    btn_mapa = ttk.Button(barra_carto, text="Ver mapa", command=ver_mapa, state="disabled")
+    btn_mapa = ttk.Button(barra_carto, text="🌐 Ver mapa", command=ver_mapa, state="disabled")
     btn_mapa.pack(side="right", padx=5)
 
     def abrir_enlace_eidos(event=None):
@@ -289,16 +299,19 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
         scroll.pack(side="right", fill="y")
         return scrollable_f, canvas
 
-    # Cartografía primero para mantenerla accesible incluso con muchas pestañas.
-    tree_coord, cols_coord = crear_pestana_tree_desde_df("Coordenadas", df_coord)
-    tree_estado, cols_estado = crear_pestana_tree_desde_df("Estado cartografía", df_estado)
-    tree_nombres, cols_nombres = crear_pestana_tree_desde_df("Nombres Comunes", df_output)
-    scrollable_frame_info, canvas_info = crear_pestana_vertical_wrap("Información")
-    tree_cons, cols_cons = crear_pestana_tree_desde_df("Conservación", df_con)
-    tree_col, cols_col = crear_pestana_tree_desde_df("Colecciones", df_collec)
-    tree_legal, cols_legal = crear_pestana_tree_desde_df("Estado Legal", df_leg)
-    tree_bib, cols_bib = crear_pestana_tree_desde_df("Bibliografía", df_bi)
-    tree_sin, cols_sin = crear_pestana_tree_desde_df("Sinonimia", df_si)
+    scrollable_frame_info, canvas_info = crear_pestana_vertical_wrap("🔵 Información")
+    tree_sin, cols_sin = crear_pestana_tree_desde_df("🟣 Sinonimia", df_si)
+    tree_cons, cols_cons = crear_pestana_tree_desde_df("🟢 Conservación", df_con)
+    tree_legal, cols_legal = crear_pestana_tree_desde_df("⚖️ Estado Legal", df_leg)
+    tree_col, cols_col = crear_pestana_tree_desde_df("📚 Colecciones", df_collec)
+    tree_bib, cols_bib = crear_pestana_tree_desde_df("📖 Bibliografía", df_bi)
+    tree_nombres, cols_nombres = crear_pestana_tree_desde_df("🏷️ Nombres Comunes", df_output)
+
+    tree_estado, cols_estado = None, []
+    tree_coord, cols_coord = None, []
+    if hay_cartografia:
+        tree_estado, cols_estado = crear_pestana_tree_desde_df("🗺️ Estado cartografía", df_estado)
+        tree_coord, cols_coord = crear_pestana_tree_desde_df("📍 Coordenadas", df_coord)
 
     def actualizar_vista():
         if total_registros == 0:
@@ -306,47 +319,55 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
         idx = current_idx["val"]
         row = df_input.iloc[idx]
 
-        # Actualizar Panel Izquierdo (Sin recuadros)
         for col in input_columns:
             val_text = str(row.get(col, ""))
             labels_left_values[col].config(text=val_text if val_text else "-")
 
         e_id = str(row.get("EIDOS_ID", "")).strip()
 
-        for t in [tree_coord, tree_estado, tree_nombres, tree_cons, tree_col, tree_legal, tree_bib, tree_sin]:
-            for item in t.get_children():
-                t.delete(item)
+        lista_trees = [tree_nombres, tree_cons, tree_col, tree_legal, tree_bib, tree_sin]
+        if hay_cartografia:
+            lista_trees.extend([tree_estado, tree_coord])
+
+        for t in lista_trees:
+            if t:
+                for item in t.get_children():
+                    t.delete(item)
 
         for widget in scrollable_frame_info.winfo_children():
             widget.destroy()
 
         def poblar_tree(df_target, tree_target, columnas_tree):
-            if not df_target.empty and e_id and "EIDOS_ID" in df_target.columns:
+            if tree_target and not df_target.empty and e_id and "EIDOS_ID" in df_target.columns:
                 filtrados = df_target[df_target["EIDOS_ID"].astype(str).str.strip() == e_id]
                 for _, r in filtrados.iterrows():
                     vals = [r.get(c, "") for c in columnas_tree]
                     tree_target.insert("", "end", values=vals)
 
         poblar_tree(df_output, tree_nombres, cols_nombres)
-        poblar_tree(df_estado, tree_estado, cols_estado)
-        puntos = df_coord[df_coord["taxonId"].astype(str) == e_id]
-        for _, punto in puntos.iterrows():
-            tree_coord.insert("", "end", values=[
-                f"{punto[c]:.8f}" if c in ("latdecimal", "longdecimal") else punto[c]
-                for c in cols_coord
-            ])
-        estado = df_estado[df_estado["EIDOS_ID"].astype(str) == e_id]
-        btn_mapa.config(state="normal" if not puntos.empty else "disabled")
+        
+        puntos = df_coord[df_coord["taxonId"].astype(str) == e_id] if not df_coord.empty else pd.DataFrame()
+        if hay_cartografia:
+            poblar_tree(df_estado, tree_estado, cols_estado)
+            for _, punto in puntos.iterrows():
+                tree_coord.insert("", "end", values=[
+                    f"{punto[c]:.8f}" if c in ("latdecimal", "longdecimal") else punto[c]
+                    for c in cols_coord
+                ])
+        
         if not puntos.empty:
-            lbl_carto.config(text=f"{len(puntos)} cuadrículas. Coordenadas WGS84 de sus centros; no son observaciones puntuales.")
-        elif not estado.empty and estado.iloc[0]["estado"] == "error":
-            lbl_carto.config(text="Error de consulta WFS. Consulta 'Estado cartografía'; no equivale a ausencia de distribución.")
-        elif not estado.empty:
-            lbl_carto.config(text="El WFS no devolvió cuadrículas para este taxón.")
+            btn_mapa.config(state="normal")
+            lbl_carto.config(text=f"🌐 {len(puntos)} cuadrículas encontradas. Coordenadas WGS84 de sus centros.")
         else:
-            lbl_carto.config(text="Sin consulta cartográfica disponible para este registro.")
+            btn_mapa.config(state="disabled")
+            estado = df_estado[df_estado["EIDOS_ID"].astype(str) == e_id] if not df_estado.empty else pd.DataFrame()
+            if not estado.empty and estado.iloc[0]["estado"] == "error":
+                lbl_carto.config(text="⚠️ Error de consulta WFS. Consulta la pestaña 'Estado cartografía'.")
+            elif not estado.empty:
+                lbl_carto.config(text="Sin cuadrículas de distribución registradas para este taxón.")
+            else:
+                lbl_carto.config(text="Cartografía no descargada o sin datos.")
 
-        # Actualizar Panel Derecho (Información con Wrap inteligente adaptable al ancho)
         if not df_inf.empty and e_id and "EIDOS_ID" in df_inf.columns:
             match_info = df_inf[df_inf["EIDOS_ID"].astype(str).str.strip() == e_id]
             if not match_info.empty:
@@ -376,7 +397,7 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
             lbl_enlace.config(text=f"🔗 Abrir ficha de EIDOS (ID: {e_id})", fg="blue")
         else:
             url_ficha_actual["link"] = ""
-            lbl_enlace.config(text="🔗 Ficha de EIDOS no disponible para este registro", fg="gray")
+            lbl_enlace.config(text="🔗 Ficha de EIDOS no disponible", fg="gray")
 
         lbl_estado.config(text=f"Registro {idx + 1} de {total_registros}")
         entry_ir.delete(0, tk.END)
@@ -460,10 +481,12 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
             df_collec.to_csv(f_col, index=False, encoding="utf-8")
             df_leg.to_csv(f_legal, index=False, encoding="utf-8")
             df_bi.to_csv(f_bib, index=False, encoding="utf-8")
-            df_si.to_csv(f_sin, index=False, encoding="utf-8")
-            guardar_cartografia(
-                df_coord, geojson, df_estado, dir_salida, nombre_base
-            )
+            df_sin.to_csv(f_sin, index=False, encoding="utf-8")
+            
+            if hay_cartografia:
+                guardar_cartografia(
+                    df_coord, geojson, df_estado, dir_salida, nombre_base
+                )
 
             with pd.ExcelWriter(f_excel, engine="openpyxl") as writer:
                 if not df_input.empty: df_input.to_excel(writer, sheet_name="taxones", index=False)
@@ -473,9 +496,10 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
                 if not df_collec.empty: df_collec.to_excel(writer, sheet_name="ColeccionesCatalogos", index=False)
                 if not df_leg.empty: df_leg.to_excel(writer, sheet_name="EstadoLegal", index=False)
                 if not df_bi.empty: df_bi.to_excel(writer, sheet_name="Bibliografia", index=False)
-                if not df_si.empty: df_si.to_excel(writer, sheet_name="Sinonimia", index=False)
-                df_coord.to_excel(writer, sheet_name="Coordenadas", index=False)
-                df_estado.to_excel(writer, sheet_name="EstadoCartografia", index=False)
+                if not df_sin.empty: df_sin.to_excel(writer, sheet_name="Sinonimia", index=False)
+                if hay_cartografia:
+                    df_coord.to_excel(writer, sheet_name="Coordenadas", index=False)
+                    df_estado.to_excel(writer, sheet_name="EstadoCartografia", index=False)
 
             conn = sqlite3.connect(f_db)
             if not df_input.empty: df_input.to_sql("taxones", conn, if_exists="replace", index=False)
@@ -486,8 +510,9 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
             if not df_leg.empty: df_leg.to_sql("EstadoLegal", conn, if_exists="replace", index=False)
             if not df_bi.empty: df_bi.to_sql("Bibliografia", conn, if_exists="replace", index=False)
             if not df_si.empty: df_si.to_sql("Sinonimia", conn, if_exists="replace", index=False)
-            df_coord.to_sql("Coordenadas", conn, if_exists="replace", index=False)
-            df_estado.to_sql("EstadoCartografia", conn, if_exists="replace", index=False)
+            if hay_cartografia:
+                df_coord.to_sql("Coordenadas", conn, if_exists="replace", index=False)
+                df_estado.to_sql("EstadoCartografia", conn, if_exists="replace", index=False)
             conn.close()
 
             exportado_realizado["val"] = True
@@ -495,10 +520,8 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
             messagebox.showinfo(
                 "Éxito", 
                 f"Exportación completada correctamente en:\n{dir_salida}\n\n"
-                f"• Archivos CSV generados, incluido Coordenadas (separador ;)\n"
-                f"• Distribución de cuadrículas en GeoJSON\n"
-                f"• Excel generado: {os.path.basename(f_excel)}\n"
-                f"• SQLite DB generada: {os.path.basename(f_db)}"
+                f"• Archivos CSV generados\n"
+                f"• Excel y SQLite generados con éxito."
             )
             abrir_archivo_sistema(dir_salida)
             visor.destroy()
@@ -513,9 +536,7 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
             respuesta = messagebox.askyesnocancel(
                 "Cerrar visor",
                 "¿Quieres exportar todos los resultados antes de cerrar?\n\n"
-                "Las coordenadas y el GeoJSON se guardan automáticamente al terminar "
-                "la descarga, salvo que se haya notificado un error de escritura. "
-                "Cerrar no elimina ningún archivo.",
+                "Las coordenadas y el GeoJSON se guardan automáticamente al terminar.",
                 parent=visor,
             )
             if respuesta is None:
