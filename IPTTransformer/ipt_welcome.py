@@ -1,483 +1,264 @@
-"""
+﻿"""
 ipt_welcome.py
 ==============
-Pantalla inicial con asistente de normalización, configuración de Core y Extensiones,
-y paso de los datasets estructurados hacia el visor en estrella.
+Ventana de bienvenida y carga inicial de datasets DwC-A, con soporte
+para la subida y configuración de ficheros Core y múltiples ramas (extensiones).
 """
 
 import os
-import shutil
-import uuid
-from collections import Counter
+import traceback
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import ttk, messagebox, filedialog, simpledialog
 from ipt_loader import inspect_file_headers, load_file_data
-from dwc_manager import verify_and_initialize_dictionary, update_dictionary_from_source, get_core_types, get_extension_types
+from dwc_manager import get_core_types, get_extension_types
+from ipt_analyzer import IPTDatasetAnalyzer
+from ipt_dialogs import MultiRecordSplitterDialog
+from ipt_viewer import IPTViewerWindow
+from ipt_model import validate_dataset
 
-class MultiRecordSplitterDialog(tk.Toplevel):
-    """Asistente iterativo con doble panel explícito para normalización en estrella."""
-    def __init__(self, parent, headers, rows, id_col, dataset_name="Core"):
-        super().__init__(parent)
-        self.title(f"Asistente de Normalización DwC-A ({dataset_name})")
-        self.geometry("1000x650")
-        self.grab_set()
+class IPTWelcomeWindow(tk.Frame):
+    """Pantalla inicial para la selección, inspección y carga del Core y sus Ramas."""
+    def __init__(self, root):
+        super().__init__(root, padx=20, pady=20)
+        self.root = root
+        self.core_file_path = None
+        self.core_headers = []
+        self.core_rows = []
+        self.external_extensions = [] # Lista para almacenar las ramas subidas
 
-        self.headers = list(headers)
-        self.rows = rows
-        self.id_col = id_col
+        # Título principal
+        tk.Label(
+            self, text="🌟 IPT-Transformer | Normalización y Mapeo Relacional", 
+            font=("Segoe UI", 14, "bold"), fg="#1f6fb2"
+        ).pack(anchor="w", pady=(0, 10))
+
+        tk.Label(
+            self, text="Configure el Core y opcionalmente añada ficheros de ramas (extensiones) para construir la estrella DwC-A.",
+            font=("Segoe UI", 10), fg="#444444"
+        ).pack(anchor="w", pady=(0, 15))
+
+        # --- SECCIÓN 1: CONFIGURACIÓN DEL CORE ---
+        core_frame = tk.LabelFrame(self, text=" 📂 Fichero Core (Tabla Principal) ", font=("Segoe UI", 10, "bold"), padx=15, pady=12)
+        core_frame.pack(fill="x", pady=5)
+
+        file_box = tk.Frame(core_frame)
+        file_box.pack(fill="x", pady=5)
         
-        self.id_idx = 0
-        for idx, h in enumerate(self.headers):
-            if h.lower() == id_col.lower():
-                self.id_idx = idx
-                break
+        self.lbl_core_file = tk.Label(file_box, text="Ningún archivo Core seleccionado", font=("Segoe UI", 9, "italic"), fg="#777777")
+        self.lbl_core_file.pack(side="left", padx=(0, 10))
 
-        self.extracted_datasets = [] 
-        self.current_core_headers = [h for h in self.headers if h.lower() != self.id_col.lower()]
-        self.current_ext_headers = []
-        self.clean_rows = list(rows)
+        tk.Button(
+            file_box, text="📁 Examinar Core...", bg="#f0f0f0", fg="#333333",
+            font=("Segoe UI", 9, "bold"), relief="groove", padx=8, pady=3,
+            command=self.examinar_core
+        ).pack(side="left")
 
-        self.duplicate_rows = self.filter_only_duplicates(rows, self.id_idx)
+        params_box = tk.Frame(core_frame)
+        params_box.pack(fill="x", pady=5)
 
-        if not self.duplicate_rows:
-            messagebox.showinfo("Sin Duplicados", f"No se encontraron registros duplicados en '{dataset_name}'.", parent=self)
-            self.destroy()
-            return
+        tk.Label(params_box, text="Tipo de Core:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 5))
+        core_types = get_core_types()
+        self.combo_core_type = ttk.Combobox(params_box, values=core_types, state="readonly", width=18)
+        if core_types:
+            self.combo_core_type.set("Taxon" if "Taxon" in core_types else core_types[0])
+        self.combo_core_type.pack(side="left", padx=(0, 15))
 
-        self.varying_cols = self.detect_varying_columns(self.duplicate_rows, self.headers)
+        tk.Label(params_box, text="Columna ID Principal:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 5))
+        self.combo_id_col = ttk.Combobox(params_box, values=[], state="readonly", width=20)
+        self.combo_id_col.pack(side="left")
 
-        tk.Label(
-            self, 
-            text=f"🔍 Análisis de Registros Múltiples para: '{dataset_name}' (ID: {id_col})", 
-            font=("Segoe UI", 11, "bold"), fg="#1f6fb2"
-        ).pack(anchor="w", padx=15, pady=(15, 5))
+        # --- SECCIÓN 2: GESTIÓN DE RAMAS / EXTENSIONES ---
+        ext_frame = tk.LabelFrame(self, text=" 🌿 Ramas / Extensiones Opcionales ", font=("Segoe UI", 10, "bold"), padx=15, pady=12)
+        ext_frame.pack(fill="x", pady=10)
 
-        tk.Label(
-            self, 
-            text="Seleccione los campos del panel izquierdo (Core) y muévalos al panel derecho (Extensión) para segregarlos.\n"
-                 "Los campos marcados como [VARIABLE] contienen múltiples valores por ID.",
-            font=("Segoe UI", 9), fg="#444444"
-        ).pack(anchor="w", padx=15, pady=(0, 10))
+        ext_top = tk.Frame(ext_frame)
+        ext_top.pack(fill="x", pady=5)
 
-        top_config_frame = tk.Frame(self, bg="#f8f9fa", padx=10, pady=8, relief=tk.GROOVE, bd=1)
-        top_config_frame.pack(fill="x", padx=15, pady=5)
-
-        tk.Label(top_config_frame, text="Destino:", font=("Segoe UI", 8, "bold"), bg="#f8f9fa").pack(side="left", padx=5)
-        self.dest_var = tk.StringVar(value="Nueva Rama de Estrella (Extensión)")
-        ttk.Radiobutton(top_config_frame, text="Rama de Estrella", variable=self.dest_var, value="Nueva Rama de Estrella (Extensión)").pack(side="left", padx=5)
-        ttk.Radiobutton(top_config_frame, text="Jerárquica (Padre/Hijo)", variable=self.dest_var, value="Subdivisión Jerárquica (Misma tabla - Padre/Hijo)").pack(side="left", padx=5)
-
-        tk.Label(top_config_frame, text=" | Tipo Extensión:", font=("Segoe UI", 8, "bold"), bg="#f8f9fa").pack(side="left", padx=10)
+        tk.Label(ext_top, text="Tipo de Extensión:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 5))
         ext_types = get_extension_types()
-        self.combo_ext_type = ttk.Combobox(top_config_frame, values=ext_types, state="readonly", width=22)
-        if ext_types: self.combo_ext_type.set("EMoF" if "EMoF" in ext_types else ext_types[0])
-        self.combo_ext_type.pack(side="left", padx=5)
-
-        panels_frame = tk.Frame(self)
-        panels_frame.pack(fill="both", expand=True, padx=15, pady=10)
-
-        left_box_frame = tk.LabelFrame(panels_frame, text=" 📂 Campos en Tabla Core (Disponibles) ", font=("Segoe UI", 9, "bold"), padx=8, pady=8)
-        left_box_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
-
-        self.lb_core = tk.Listbox(left_box_frame, selectmode=tk.MULTIPLE, font=("Segoe UI", 9), exportselection=False)
-        sc_core = ttk.Scrollbar(left_box_frame, orient="vertical", command=self.lb_core.yview)
-        self.lb_core.configure(yscrollcommand=sc_core.set)
-        sc_core.pack(side="right", fill="y")
-        self.lb_core.pack(side="left", fill="both", expand=True)
-
-        middle_btns_frame = tk.Frame(panels_frame, padx=10)
-        middle_btns_frame.pack(side="left", fill="y")
-        
-        tk.Button(
-            middle_btns_frame, text=" ➡️ \nMover", command=self.mover_a_extension, 
-            bg="#2196F3", fg="white", font=("Segoe UI", 9, "bold"), width=8, pady=5
-        ).pack(pady=40)
+        self.combo_ext_type = ttk.Combobox(ext_top, values=ext_types, state="readonly", width=18)
+        if ext_types:
+            self.combo_ext_type.set("EMoF" if "EMoF" in ext_types else ext_types[0])
+        self.combo_ext_type.pack(side="left", padx=(0, 15))
 
         tk.Button(
-            middle_btns_frame, text=" ⬅️ \nRegresar", command=self.mover_a_core, 
-            bg="#6c757d", fg="white", font=("Segoe UI", 9, "bold"), width=8, pady=5
-        ).pack(pady=5)
+            ext_top, text="➕ Cargar Fichero de Rama...", bg="#e2e6ea", fg="#333333",
+            font=("Segoe UI", 9, "bold"), relief="groove", padx=8, pady=3,
+            command=self.añadir_rama_externa
+        ).pack(side="left")
 
-        right_box_frame = tk.LabelFrame(panels_frame, text=" 🚀 Campos hacia Nueva Extensión (Rama) ", font=("Segoe UI", 9, "bold"), padx=8, pady=8)
-        right_box_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        # Lista visual de ramas añadidas
+        self.lb_ramas = tk.Listbox(ext_frame, height=4, font=("Segoe UI", 9))
+        self.lb_ramas.pack(fill="x", pady=5)
 
-        self.lb_ext = tk.Listbox(right_box_frame, selectmode=tk.MULTIPLE, font=("Segoe UI", 9), exportselection=False)
-        sc_ext = ttk.Scrollbar(right_box_frame, orient="vertical", command=self.lb_ext.yview)
-        self.lb_ext.configure(yscrollcommand=sc_ext.set)
-        sc_ext.pack(side="right", fill="y")
-        self.lb_ext.pack(side="left", fill="both", expand=True)
+        # --- BOTÓN DE ACCESO AL VISOR ---
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(fill="x", pady=15)
 
-        self.poblar_listas_dobles()
+        self.btn_cargar = tk.Button(
+            btn_frame, text="🚀 Cargar Estrella Completa (Core y Ramas)", bg="#28a745", fg="white",
+            font=("Segoe UI", 10, "bold"), relief="flat", padx=15, pady=8,
+            state="disabled", command=self.procesar_y_lanzar
+        )
+        self.btn_cargar.pack(side="left")
 
-        action_frame = tk.Frame(self, padx=15, pady=5)
-        action_frame.pack(fill="x")
-
-        tk.Button(
-            action_frame, text="⚡ Ejecutar Segregación y Salvar Rama", 
-            command=self.ejecutar_segregacion, bg="#4CAF50", fg="white", 
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left", padx=5)
-
-        tk.Button(
-            action_frame, text="✅ Finalizar Asistente", 
-            command=self.destroy, bg="#1f6fb2", fg="white", 
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="right", padx=5)
-
-    def filter_only_duplicates(self, rows, id_idx):
-        id_values = [str(r[id_idx]) for r in rows if len(r) > id_idx]
-        counts = Counter(id_values)
-        return [r for r in rows if len(r) > id_idx and counts[str(r[id_idx])] > 1]
-
-    def detect_varying_columns(self, duplicate_rows, headers):
-        id_to_rows = {}
-        for r in duplicate_rows:
-            cid = str(r[self.id_idx])
-            id_to_rows.setdefault(cid, []).append(r)
-
-        varying = set()
-        for cid, group in id_to_rows.items():
-            for idx, h in enumerate(headers):
-                vals = set(str(row[idx]) for row in group if len(row) > idx)
-                if len(vals) > 1:
-                    varying.add(h)
-        return varying
-
-    def poblar_listas_dobles(self):
-        self.lb_core.delete(0, tk.END)
-        for h in self.current_core_headers:
-            display_text = f"⚠️ [VARIABLE] {h}" if h in self.varying_cols else f"   {h}"
-            self.lb_core.insert(tk.END, display_text)
-
-        self.lb_ext.delete(0, tk.END)
-        for h in self.current_ext_headers:
-            display_text = f"⚠️ [VARIABLE] {h}" if h in self.varying_cols else f"   {h}"
-            self.lb_ext.insert(tk.END, display_text)
-
-    def mover_a_extension(self):
-        selected_indices = self.lb_core.curselection()
-        if not selected_indices:
-            return
-        items_to_move = []
-        for idx in selected_indices:
-            raw_text = self.lb_core.get(idx)
-            clean_name = raw_text.replace("⚠️ [VARIABLE]", "").replace("   ", "").strip()
-            items_to_move.append(clean_name)
-
-        for name in items_to_move:
-            if name in self.current_core_headers:
-                self.current_core_headers.remove(name)
-            if name not in self.current_ext_headers:
-                self.current_ext_headers.append(name)
-        self.poblar_listas_dobles()
-
-    def mover_a_core(self):
-        selected_indices = self.lb_ext.curselection()
-        if not selected_indices:
-            return
-        items_to_move = []
-        for idx in selected_indices:
-            raw_text = self.lb_ext.get(idx)
-            clean_name = raw_text.replace("⚠️ [VARIABLE]", "").replace("   ", "").strip()
-            items_to_move.append(clean_name)
-
-        for name in items_to_move:
-            if name in self.current_ext_headers:
-                self.current_ext_headers.remove(name)
-            if name not in self.current_core_headers:
-                self.current_core_headers.append(name)
-        self.poblar_listas_dobles()
-
-    def ejecutar_segregacion(self):
-        if not self.current_ext_headers:
-            messagebox.showwarning("Aviso", "No ha seleccionado ninguna columna para la extensión en el panel derecho.", parent=self)
+    def examinar_core(self):
+        path = filedialog.askopenfilename(
+            title="Seleccionar archivo Core",
+            filetypes=[("Archivos Tabulares / Texto", "*.txt *.csv *.tsv"), ("Todos los archivos", "*.*")]
+        )
+        if not path:
             return
 
-        selected_cols = list(self.current_ext_headers)
-        dest = self.dest_var.get()
+        try:
+            headers, preview = inspect_file_headers(path)
+            self.core_file_path = path
+            self.core_headers, self.core_rows = headers, preview
+            self.lbl_core_file.config(text=os.path.basename(path), fg="#28a745")
+            self.combo_id_col["values"] = self.core_headers
+            self.combo_id_col.set("")
+            if self.core_headers:
+                preferred = {"Taxon": "taxonID", "Event": "eventID",
+                             "Occurrence": "occurrenceID",
+                             "MaterialSample": "materialSampleID"}.get(self.combo_core_type.get())
+                for h in self.core_headers:
+                    if h.casefold() == str(preferred).casefold():
+                        self.combo_id_col.set(h)
+                        break
+                if not self.combo_id_col.get():
+                    for h in self.core_headers:
+                        if h.casefold().endswith("id"):
+                            self.combo_id_col.set(h)
+                            break
+                if not self.combo_id_col.get():
+                    self.combo_id_col.set(self.core_headers[0])
+
+            self.btn_cargar.config(state="normal")
+        except Exception as e:
+            messagebox.showerror("Error de Lectura", f"No se pudo inspeccionar el Core:\n{e}", parent=self)
+
+    def añadir_rama_externa(self):
+        if not self.core_file_path:
+            messagebox.showwarning("Core requerido", "Cargue primero el fichero Core.", parent=self)
+            return
+        path = filedialog.askopenfilename(
+            title="Seleccionar archivo de extensión (Rama)",
+            filetypes=[("Archivos Tabulares / Texto", "*.txt *.csv *.tsv"), ("Todos los archivos", "*.*")]
+        )
+        if not path:
+            return
+
         ext_type = self.combo_ext_type.get()
+        if not ext_type:
+            messagebox.showwarning("Aviso", "Seleccione un tipo de extensión válido.", parent=self)
+            return
 
-        if "Estrella" in dest:
-            ext_id_col = f"{ext_type.lower()}ID" if ext_type else "recordID"
-            ext_fields = [self.id_col] + selected_cols + [ext_id_col]
-            
-            ext_rows = []
-            for r in self.duplicate_rows:
-                c_id = str(r[self.id_idx])
-                row_dict = {self.headers[i]: r[i] for i in range(len(self.headers)) if i < len(r)}
-                ext_row = [c_id] + [row_dict.get(col, "") for col in selected_cols] + [str(uuid.uuid4())[:8]]
-                ext_rows.append(ext_row)
+        try:
+            ext_headers, ext_rows = load_file_data(path)
+            if not ext_headers:
+                raise ValueError("El fichero de rama está vacío o no tiene cabeceras.")
 
-            self.extracted_datasets.append({
+            # Inferir columna de relación FK basándose en el Core ID
+            candidates = [self.combo_id_col.get(), "coreID"]
+            fk_col = next((h for c in candidates for h in ext_headers
+                           if h.casefold() == c.casefold()), None)
+            if fk_col is None:
+                fk_col = simpledialog.askstring(
+                    "Columna de relación",
+                    "Escriba la cabecera que contiene los IDs del Core:\n"
+                    + ", ".join(ext_headers), parent=self
+                )
+                if fk_col is None:
+                    return
+                if fk_col not in ext_headers:
+                    raise ValueError("La columna de relación indicada no existe.")
+            self_id_col = f"{ext_type.lower()}ID"
+
+            ext_config = {
                 "tipo": ext_type,
-                "fk_col": self.id_col,
-                "self_id_col": ext_id_col,
+                "fk_col": fk_col,
+                "self_id_col": self_id_col,
                 "self_parent_col": "",
-                "fields": ext_fields,
+                "fields": ext_headers,
                 "rows": ext_rows,
                 "is_hierarchical": False
-            })
-            messagebox.showinfo("Rama Salvada", f"Se ha salvado y creado la rama independiente '{ext_type}'.", parent=self)
-        else:
-            self_id_col = "subRecordID"
-            self_parent_col = "parentRecordID"
-            ext_fields = [self.id_col] + selected_cols + [self_id_col, self_parent_col]
-
-            ext_rows = []
-            for r in self.duplicate_rows:
-                c_id = str(r[self.id_idx])
-                row_dict = {self.headers[i]: r[i] for i in range(len(self.headers)) if i < len(r)}
-                ext_row = [c_id] + [row_dict.get(col, "") for col in selected_cols] + [str(uuid.uuid4())[:8], ""]
-                ext_rows.append(ext_row)
-
-            self.extracted_datasets.append({
-                "tipo": ext_type,
-                "fk_col": self.id_col,
-                "self_id_col": self_id_col,
-                "self_parent_col": self_parent_col,
-                "fields": ext_fields,
-                "rows": ext_rows,
-                "is_hierarchical": True
-            })
-            messagebox.showinfo("Rama Salvada", f"Se ha salvado y creado la extensión jerárquica '{ext_type}' (Padre-Hijo).", parent=self)
-
-        self.current_ext_headers = []
-        self.process_clean_core()
-        
-        self.duplicate_rows = self.filter_only_duplicates(self.rows, self.id_idx)
-        self.varying_cols = self.detect_varying_columns(self.duplicate_rows, self.headers)
-        self.poblar_listas_dobles()
-
-        if not self.duplicate_rows:
-            messagebox.showinfo("Normalización Completa", "¡Ya no quedan registros duplicados en esta tabla!", parent=self)
-            self.destroy()
-
-    def process_clean_core(self):
-        unique_map = {}
-        for r in self.rows:
-            if len(r) <= self.id_idx:
-                continue
-            cid = str(r[self.id_idx])
-            if cid not in unique_map:
-                unique_map[cid] = list(r)
-        self.clean_rows = list(unique_map.values())
-
-
-class IPTWelcomeFrame(tk.Frame):
-    def __init__(self, root, viewer):
-        super().__init__(root)
-        self.root = root
-        self.viewer = viewer
-
-        self.core_data = None  
-        self.extensions_data = []  
-        self.original_file_path = None  
-
-        verify_and_initialize_dictionary(self.root)
-
-        header_frame = tk.Frame(self)
-        header_frame.pack(fill="x", padx=15, pady=(15, 5))
-
-        tk.Label(header_frame, text="IPT-Transformer - Estructuración Darwin Core Archive", font=("Segoe UI", 14, "bold"), fg="#1f6fb2").pack(side="left")
-        
-        tk.Button(
-            header_frame, text="🔄 Sincronizar Diccionario DwC", bg="#17a2b8", fg="white", 
-            font=("Segoe UI", 8, "bold"), relief="flat", padx=8, pady=4,
-            command=lambda: update_dictionary_from_source(self.root)
-        ).pack(side="right")
-
-        # Panel Core
-        frame_core = tk.LabelFrame(self, text=" 1. Archivo Core (Estrella - Centro) ", font=("Segoe UI", 9, "bold"), padx=10, pady=8)
-        frame_core.pack(fill="x", padx=15, pady=5)
-
-        f_c1 = tk.Frame(frame_core)
-        f_c1.pack(fill="x", pady=2)
-        tk.Button(f_c1, text="📁 Seleccionar Core", command=self.cargar_core, bg="#2196F3", fg="white", font=("Segoe UI", 9, "bold")).pack(side="left")
-        self.lbl_core = tk.Label(f_c1, text="(ningún archivo Core seleccionado)", font=("Segoe UI", 9, "italic"), fg="#666666")
-        self.lbl_core.pack(side="left", padx=10)
-
-        self.lbl_core_info = tk.Label(frame_core, text="Tipo: No definido | ID Core: No definido", font=("Segoe UI", 8), fg="#333333")
-        self.lbl_core_info.pack(anchor="w", pady=(4, 0))
-
-        # Panel Extensiones
-        frame_ext = tk.LabelFrame(self, text=" 2. Extensiones (Brazos de la Estrella - Opcional) ", font=("Segoe UI", 9, "bold"), padx=10, pady=8)
-        frame_ext.pack(fill="x", padx=15, pady=5)
-
-        f_e1 = tk.Frame(frame_ext)
-        f_e1.pack(fill="x", pady=2)
-        tk.Button(f_e1, text="➕ Agregar Extensión", command=self.agregar_extension, bg="#4CAF50", fg="white", font=("Segoe UI", 9, "bold")).pack(side="left")
-        
-        self.listbox_ext = tk.Listbox(frame_ext, height=4, font=("Segoe UI", 9))
-        self.listbox_ext.pack(fill="x", pady=(5, 0))
-
-        # Botón Lanzar Visor Estrella
-        action_bar = tk.Frame(self, padx=15, pady=20)
-        action_bar.pack(fill="x")
-
-        self.btn_run = tk.Button(action_bar, text="🚀 Generar Visor en Estrella y Guardar/Exportar", command=self.lanzar_visor, bg="#CCCCCC", fg="white", font=("Segoe UI", 11, "bold"), state=tk.DISABLED)
-        self.btn_run.pack(fill="x", ipady=5)
-
-    def cargar_core(self):
-        f = filedialog.askopenfilename(title="Seleccionar archivo Core", filetypes=[("Archivos CSV/TXT", "*.csv *.tsv *.txt"), ("Todos", "*.*")])
-        if not f:
-            return
-
-        self.original_file_path = f
-        headers, _, _ = inspect_file_headers(f)
-        if not headers:
-            messagebox.showerror("Error", "No se pudieron leer las cabeceras del archivo.", parent=self.root)
-            return
-
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Configurar Archivo Core")
-        dialog.geometry("400x240")
-        dialog.grab_set()
-
-        core_types = get_core_types()
-
-        tk.Label(dialog, text="Seleccione el Tipo de Core:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=5)
-        combo_tipo = ttk.Combobox(dialog, values=core_types, state="readonly", width=35)
-        if core_types: combo_tipo.set(core_types[0])
-        combo_tipo.pack(padx=10, pady=2)
-
-        tk.Label(dialog, text="Columna ID Principal (Core ID):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=5)
-        combo_id = ttk.Combobox(dialog, values=headers, state="readonly", width=35)
-        if headers: combo_id.set(headers[0])
-        combo_id.pack(padx=10, pady=2)
-
-        def guardar_config():
-            tipo = combo_tipo.get()
-            id_col = combo_id.get()
-            headers_c, rows_c, enc, delim = load_file_data(f)
-
-            try:
-                id_idx = 0
-                for idx, h in enumerate(headers_c):
-                    if h.lower() == id_col.lower():
-                        id_idx = idx
-                        break
-
-                id_values = [str(r[id_idx]) for r in rows_c if len(r) > id_idx]
-                counts = Counter(id_values)
-                duplicates = {val: cnt for val, cnt in counts.items() if cnt > 1}
-
-                if duplicates:
-                    splitter = MultiRecordSplitterDialog(dialog, headers_c, rows_c, id_col, dataset_name=tipo)
-                    dialog.wait_window(splitter)
-
-                    rows_c = splitter.clean_rows
-                    for ext in splitter.extracted_datasets:
-                        self.extensions_data.append(ext)
-                        self.listbox_ext.insert(tk.END, f"{ext['tipo']} (Normalizada - ID: {id_col})")
-            except Exception as e:
-                print(f"Aviso en validación de unicidad: {e}")
-
-            self.core_data = {
-                "tipo": tipo, "id_col": id_col, 
-                "fields": headers_c, "rows": rows_c, "enc": enc, "delim": delim
             }
-            self.lbl_core.config(text=os.path.basename(f), fg="#000000")
-            self.lbl_core_info.config(text=f"Tipo: {tipo} | ID Core: {id_col}")
-            dialog.destroy()
-            self.verificar_estado()
+            ext_config["source_path"] = path
 
-        tk.Button(dialog, text="Aceptar y Analizar", command=guardar_config, bg="#289530", fg="white", font=("Segoe UI", 9, "bold")).pack(pady=10)
+            self.external_extensions.append(ext_config)
+            self.lb_ramas.insert(tk.END, f"🌿 Rama [{ext_type}] -> {os.path.basename(path)} ({len(ext_rows)} registros)")
+            messagebox.showinfo("Rama Añadida", f"Se ha incorporado correctamente la rama '{ext_type}'.", parent=self)
 
-    def agregar_extension(self):
-        if not self.core_data:
-            messagebox.showwarning("Aviso", "Primero debe configurar el archivo Core.", parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar el fichero de rama:\n{e}", parent=self)
+
+    def procesar_y_lanzar(self):
+        if not self.core_file_path:
             return
 
-        f = filedialog.askopenfilename(title="Seleccionar archivo de Extensión", filetypes=[("Archivos CSV/TXT", "*.csv *.tsv *.txt"), ("Todos", "*.*")])
-        if not f:
+        core_type = self.combo_core_type.get()
+        id_col = self.combo_id_col.get()
+
+        if not id_col:
+            messagebox.showwarning("Aviso", "Debe seleccionar una columna para el ID principal del Core.", parent=self)
             return
 
-        headers, _, _ = inspect_file_headers(f)
-        if not headers:
-            messagebox.showerror("Error", "No se pudieron leer las cabeceras.", parent=self.root)
-            return
+        try:
+            headers, rows = load_file_data(self.core_file_path)
+            analyzer = IPTDatasetAnalyzer(headers, rows, id_col)
+            duplicados = analyzer.filtrar_duplicados()
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Configurar Extensión DwC-A")
-        dialog.geometry("420x360")
-        dialog.grab_set()
+            generated_exts = []
 
-        ext_types = get_extension_types()
+            # Si hay duplicados en el Core, ofrecemos segregación automática
+            if duplicados:
+                respuesta = messagebox.askyesno(
+                    "IDs Duplicados en Core",
+                    f"Se han detectado registros duplicados en la columna '{id_col}' del Core.\n\n"
+                    "¿Desea abrir el asistente de normalización para extraer ramas adicionales automáticamente?",
+                    parent=self
+                )
+                if respuesta:
+                    dialog = MultiRecordSplitterDialog(self.root, headers, rows, id_col, dataset_name=core_type)
+                    self.root.wait_window(dialog)
+                    if hasattr(dialog, "clean_rows") and dialog.clean_rows:
+                        rows = dialog.clean_rows
+                        headers = dialog.headers
+                    
+                    if hasattr(dialog, "extracted_datasets") and dialog.extracted_datasets:
+                        generated_exts = dialog.extracted_datasets
 
-        tk.Label(dialog, text="Tipo de Extensión oficial:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=5)
-        combo_ext_type = ttk.Combobox(dialog, values=ext_types, state="readonly", width=38)
-        if ext_types: combo_ext_type.set(ext_types[0])
-        combo_ext_type.pack(padx=10, pady=2)
-
-        tk.Label(dialog, text="Clave Foránea hacia el Core (FK):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=5)
-        combo_fk = ttk.Combobox(dialog, values=headers, state="readonly", width=38)
-        if headers: combo_fk.set(headers[0])
-        combo_fk.pack(padx=10, pady=2)
-
-        tk.Label(dialog, text="ID propio [Opcional]:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
-        combo_self_id = ttk.Combobox(dialog, values=["(Crear automáticamente si no existe)"] + headers, state="readonly", width=38)
-        combo_self_id.set("(Crear automáticamente si no existe)")
-        combo_self_id.pack(padx=10, pady=2)
-
-        tk.Label(dialog, text="ID de Padre [Opcional]:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
-        combo_self_parent = ttk.Combobox(dialog, values=["(Ninguno / Crear si no existe)"] + headers, state="readonly", width=38)
-        combo_self_parent.set("(Ninguno / Crear si no existe)")
-        combo_self_parent.pack(padx=10, pady=2)
-
-        def guardar_ext():
-            tipo = combo_ext_type.get().strip()
-            fk_col = combo_fk.get()
-            self_id = combo_self_id.get()
-            self_parent = combo_self_parent.get()
-            
-            s_id = None if self_id == "(Crear automáticamente si no existe)" else self_id
-            s_parent = None if self_parent == "(Ninguno / Crear si no existe)" else self_parent
-
-            if s_id and s_parent and s_id == s_parent:
-                messagebox.showerror("Error de Configuración", "El ID propio y el ID de padre no pueden ser la misma columna.", parent=dialog)
+            # Combinar ramas subidas por fichero + ramas generadas por asistente
+            all_extensions = self.external_extensions + generated_exts
+            errors = validate_dataset(
+                {"fields": headers, "rows": rows, "id_col": id_col}, is_core=True
+            )
+            if errors:
+                messagebox.showerror("Core no válido", "\n".join(errors), parent=self)
                 return
+            core_ids = {str(row[headers.index(id_col)]) for row in rows}
+            for extension in all_extensions:
+                errors = validate_dataset(extension, core_ids=core_ids)
+                if errors:
+                    raise ValueError(f"Extensión {extension['tipo']}: " + "\n".join(errors))
 
-            headers_e, rows_e, enc, delim = load_file_data(f)
-            self.extensions_data.append({
-                "tipo": tipo, "fk_col": fk_col,
-                "self_id_col": s_id, "self_parent_col": s_parent,
-                "fields": headers_e, "rows": rows_e, "enc": enc, "delim": delim
-            })
-            
-            self.listbox_ext.insert(tk.END, f"{tipo} (FK: {fk_col})")
-            dialog.destroy()
-            self.verificar_estado()
+            self.abrir_visor(headers, rows, core_type, id_col, all_extensions)
 
-        tk.Button(dialog, text="Aceptar", command=guardar_ext, bg="#289530", fg="white", font=("Segoe UI", 9, "bold")).pack(pady=15)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo procesar el dataset:\n{e}", parent=self)
 
-    def verificar_estado(self):
-        if self.core_data:
-            self.btn_run.config(state=tk.NORMAL, bg="#289530")
+    def abrir_visor(self, headers, rows, core_type, id_col, ext_configs):
+        core_config = {
+            "tipo": core_type,
+            "id_col": id_col,
+            "fields": headers,
+            "rows": rows
+        }
 
-    def lanzar_visor(self):
-        if not self.core_data:
-            return
-
-        datasets = []
-        datasets.append({
-            "tipo": self.core_data['tipo'],
-            "id_col": self.core_data['id_col'],
-            "fields": self.core_data['fields'],
-            "rows": self.core_data['rows'],
-            "is_hierarchical": False
-        })
-
-        for ext in self.extensions_data:
-            datasets.append({
-                "tipo": ext['tipo'],
-                "fk_col": ext['fk_col'],
-                "self_id_col": ext.get('self_id_col'),
-                "self_parent_col": ext.get('self_parent_col'),
-                "fields": ext['fields'],
-                "rows": ext['rows'],
-                "is_hierarchical": ext.get('is_hierarchical', False)
-            })
+        datasets_config = [core_config] + ext_configs
 
         self.pack_forget()
-        self.viewer.load_datasets(datasets, self.original_file_path, self.core_data, self.extensions_data)
-        self.viewer.pack(fill="both", expand=True)
+        viewer = IPTViewerWindow(self.root)
+        viewer.set_welcome(self)
+        viewer.load_datasets(datasets_config, self.core_file_path, core_config, ext_configs)
+        viewer.pack(fill="both", expand=True)

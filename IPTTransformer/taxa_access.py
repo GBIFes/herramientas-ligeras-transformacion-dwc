@@ -8,7 +8,10 @@ Microsoft Access (.accdb) e invoca la creación automática de formularios.
 import os
 import sys
 from tkinter import messagebox, filedialog
-import win32com.client
+try:
+    import win32com.client
+except ImportError:
+    win32com = None
 
 try:
     import pyodbc
@@ -40,10 +43,11 @@ def export_to_access(parent, fields, rows, default_filename="taxonomia.accdb"):
     Pide la ruta de destino y exporta la tabla de datos taxonómicos parseados
     a Access, generando tablas y formularios interactivos de navegación.
     """
-    if sys.platform != "win32" or pyodbc is None:
+    if sys.platform != "win32" or pyodbc is None or win32com is None:
         messagebox.showerror(
             "Exportar a Access",
-            "La exportación a Access solo funciona en Windows y requiere tener instalado 'pyodbc'.",
+            "La exportación a Access solo funciona en Windows y requiere "
+            "'pyodbc', 'pywin32' y Microsoft Access Database Engine.",
             parent=parent
         )
         return

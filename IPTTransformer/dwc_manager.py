@@ -7,7 +7,7 @@ antigüedad y sincronización con el estándar oficial.
 
 import os
 import json
-import time
+import tempfile
 from tkinter import messagebox
 
 DICTIONARY_FILENAME = "dwc_dictionary.json"
@@ -173,49 +173,86 @@ def get_dictionary_path():
     return os.path.join(current_dir, DICTIONARY_FILENAME)
 
 def verify_and_initialize_dictionary(parent_window=None):
+    """Inicializa si falta; informa de errores sin reemplazar un JSON dañado."""
     path = get_dictionary_path()
     if not os.path.exists(path):
         save_dictionary(DEFAULT_DWC_DATABASE)
-        return
-    
     try:
-        file_mtime = os.path.getmtime(path)
-        age_in_days = (time.time() - file_mtime) / (60 * 60 * 24)
-        if age_in_days > 30:
-            if parent_window:
-                res = messagebox.askyesno(
-                    "Actualización de Diccionario Darwin Core",
-                    f"El diccionario '{DICTIONARY_FILENAME}' tiene más de 30 días de antigüedad.\n¿Desea actualizarlo con el estándar oficial?",
-                    parent=parent_window
-                )
-                if res:
-                    update_dictionary_from_source(parent_window)
-    except Exception:
-        pass
+        return load_dwc_database()
+    except ValueError as exc:
+        if parent_window:
+            messagebox.showerror("Diccionario no válido", str(exc), parent=parent_window)
+        raise
 
 def save_dictionary(data):
+    validate_dictionary(data)
     path = get_dictionary_path()
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=os.path.dirname(path),
+            suffix=".tmp", delete=False
+        ) as f:
+            temp_path = f.name
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def validate_dictionary(data):
+    if not isinstance(data, dict):
+        raise ValueError("El diccionario debe ser un objeto JSON.")
+    for category in ("Cores", "Extensions"):
+        if not isinstance(data.get(category), dict) or not data[category]:
+            raise ValueError(f"Falta la categoría '{category}'.")
+        for name, component in data[category].items():
+            if not isinstance(component, dict) or not isinstance(component.get("terms"), dict):
+                raise ValueError(f"Componente no válido: {name}.")
+            if not component["terms"] or any(
+                not isinstance(term, str) or not isinstance(meta, dict)
+                for term, meta in component["terms"].items()
+            ):
+                raise ValueError(f"Términos no válidos en {name}.")
+    return data
 
 def update_dictionary_from_source(parent_window=None):
-    try:
-        save_dictionary(DEFAULT_DWC_DATABASE)
-        if parent_window:
-            messagebox.showinfo("Actualización Exitosa", "El diccionario Darwin Core y de Extensiones se ha sincronizado correctamente.", parent=parent_window)
-    except Exception as e:
-        if parent_window:
-            messagebox.showerror("Error", f"No se pudo actualizar el diccionario: {e}", parent=parent_window)
+    """Compatibilidad: no simula una sincronización ni sobrescribe datos locales."""
+    if parent_window:
+        messagebox.showinfo(
+            "Diccionario local",
+            "La sincronización automática no está implementada. "
+            "Use update_dictionary.py para validar e importar un JSON compatible. "
+            "El diccionario existente no se ha modificado.", parent=parent_window
+        )
+    return False
 
 def load_dwc_database():
     path = get_dictionary_path()
     if not os.path.exists(path):
         save_dictionary(DEFAULT_DWC_DATABASE)
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return DEFAULT_DWC_DATABASE
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            return validate_dictionary(json.load(f))
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError(f"No se puede cargar el diccionario '{path}': {exc}") from exc
+
+
+def _component(db, component_type, is_core):
+    components = db.get("Cores" if is_core else "Extensions", {})
+    key = str(component_type).strip().casefold()
+    for name, data in components.items():
+        if name.casefold() == key:
+            return data
+    # Los títulos de panel pueden incluir prefijos, pero nunca se elige
+    # arbitrariamente el primer tipo del diccionario.
+    if ":" in key:
+        key = key.split(":", 1)[1].strip()
+        for name, data in components.items():
+            if name.casefold() == key:
+                return data
+    return {}
 
 def get_core_types():
     db = load_dwc_database()
@@ -227,28 +264,12 @@ def get_extension_types():
 
 def get_terms_for_type(component_type, is_core=True):
     db = load_dwc_database()
-    category = "Cores" if is_core else "Extensions"
-    components = db.get(category, {})
-    matched_data = {}
-    for key, val in components.items():
-        if key.lower() in component_type.lower() or component_type.lower() in key.lower():
-            matched_data = val
-            break
-    if not matched_data and components:
-        matched_data = list(components.values())[0]
+    matched_data = _component(db, component_type, is_core)
     terms_dict = matched_data.get("terms", {})
     return list(terms_dict.keys())
 
 def get_term_metadata(component_type, term_name, is_core=True):
     db = load_dwc_database()
-    category = "Cores" if is_core else "Extensions"
-    components = db.get(category, {})
-    matched_data = {}
-    for key, val in components.items():
-        if key.lower() in component_type.lower() or component_type.lower() in key.lower():
-            matched_data = val
-            break
-    if not matched_data and components:
-        matched_data = list(components.values())[0]
+    matched_data = _component(db, component_type, is_core)
     terms_dict = matched_data.get("terms", {})
-    return terms_dict.get(term_name, {"label": term_name, "definition": "Término estándar Darwin Core requerido para el IPT.", "example": "N/A"})
+    return terms_dict.get(term_name, {"label": term_name, "definition": "Sin metadatos en el diccionario local.", "example": "N/A"})

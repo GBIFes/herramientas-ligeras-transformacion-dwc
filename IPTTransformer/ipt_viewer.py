@@ -1,15 +1,17 @@
 """
 ipt_viewer.py
 ==============
-Visor en esquema de estrella con herramientas de guardado y exportación 
-a formatos tabulares separados, Excel y Access.
+Visor en esquema de estrella con herramientas de inspección estructural,
+mapeo dinámico, doble clic en cabeceras para reestructuración/análisis
+y exportación a formatos tabulares, Excel y Access.
 """
 
-import os
-import shutil
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from dwc_manager import get_term_metadata, get_terms_for_type
+from ipt_dialogs import MultiRecordSplitterDialog
+from ipt_export import export_project, open_directory
+from ipt_model import UNMAPPED, hierarchy_entries
 
 class ToolTip:
     def __init__(self, widget, text_func):
@@ -73,11 +75,11 @@ class IPTViewerWindow(tk.Frame):
         self.core_config = None
         self.extensions_config = []
 
-        # Barra de navegación superior con opciones de guardado y exportación
+        # Barra de navegación superior
         top_nav = tk.Frame(self, bg="#dcdcdc", padx=10, pady=8)
         top_nav.pack(fill="x")
 
-        tk.Label(top_nav, text="🌟 Visor Estrella IPT / Mapeo y Exportación", font=("Segoe UI", 10, "bold"), bg="#dcdcdc", fg="#333333").pack(side="left")
+        tk.Label(top_nav, text="🌟 Visor Estrella IPT / Mapeo y Análisis Relacional", font=("Segoe UI", 10, "bold"), bg="#dcdcdc", fg="#333333").pack(side="left")
         
         tk.Button(
             top_nav, text="⬅ Volver", bg="#6c757d", fg="white", 
@@ -87,7 +89,7 @@ class IPTViewerWindow(tk.Frame):
 
         # Botón de Guardado y Exportación Principal
         tk.Button(
-            top_nav, text="💾 Salvar / Exportar (Tablas, Excel, Access)", bg="#289530", fg="white", 
+            top_nav, text="Guardar / Exportar (TSV, Excel)", bg="#289530", fg="white",
             font=("Segoe UI", 9, "bold"), relief="flat", padx=10, pady=4, 
             command=self.ejecutar_guardado_exportacion
         ).pack(side="right", padx=5)
@@ -97,7 +99,7 @@ class IPTViewerWindow(tk.Frame):
         self.var_access = tk.BooleanVar(value=False)
         
         ttk.Checkbutton(top_nav, text="Excel (.xlsx)", variable=self.var_excel).pack(side="right", padx=5)
-        ttk.Checkbutton(top_nav, text="Access (.accdb)", variable=self.var_access).pack(side="right", padx=5)
+        # Access no estaba implementado aquí: se evita anunciar una salida ficticia.
 
         self.paned_window = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.paned_window.pack(fill="both", expand=True, padx=5, pady=5)
@@ -119,8 +121,13 @@ class IPTViewerWindow(tk.Frame):
 
     def close_viewer(self):
         if self.welcome_frame:
-            self.pack_forget()
+            if not messagebox.askyesno(
+                "Volver a la carga", "Los cambios no exportados se perderán. ¿Desea volver?",
+                parent=self
+            ):
+                return
             self.welcome_frame.pack(fill="both", expand=True)
+            self.destroy()
 
     def load_datasets(self, datasets_config, original_path, core_cfg, ext_cfgs):
         self.datasets = datasets_config
@@ -137,24 +144,26 @@ class IPTViewerWindow(tk.Frame):
         if not datasets_config:
             return
 
-        # 1. Core
+        # 1. Panel Core
         core_cfg = datasets_config[0]
         self.core_tab_view = IPTDatasetPanel(
             self.top_container, 
             title=f"Core: {core_cfg['tipo']}", 
             cfg=core_cfg,
             is_core=True,
-            on_row_select=self.on_core_row_selected
+            on_row_select=self.on_core_row_selected,
+            on_structure_change=self.on_dataset_structure_changed
         )
         self.core_tab_view.pack(fill="both", expand=True)
 
-        # 2. Extensiones
+        # 2. Paneles de Extensiones
         for ext_cfg in datasets_config[1:]:
             ext_panel = IPTDatasetPanel(
                 self.notebook_ext,
                 title=f"Ext: {ext_cfg['tipo']}",
                 cfg=ext_cfg,
-                is_core=False
+                is_core=False,
+                on_structure_change=self.on_dataset_structure_changed
             )
             self.notebook_ext.add(ext_panel, text=ext_cfg['tipo'])
             self.ext_tab_views.append(ext_panel)
@@ -164,6 +173,29 @@ class IPTViewerWindow(tk.Frame):
             return
         for ext_panel in self.ext_tab_views:
             ext_panel.filtrar_por_fk(core_id_value)
+
+    def on_dataset_structure_changed(self, new_extension):
+        """Callback invocado si la reestructuración desde el título crea una nueva extensión."""
+        # Una extensión DwC debe apuntar al Core, no a otra extensión.
+        core_ids = set()
+        if self.core_config:
+            i = self.core_config["fields"].index(self.core_config["id_col"])
+            core_ids = {str(row[i]) for row in self.core_config["rows"]}
+        if new_extension:
+            fk_idx = new_extension["fields"].index(new_extension["fk_col"])
+            if any(str(row[fk_idx]) not in core_ids for row in new_extension["rows"]):
+                raise ValueError("La extensión nueva no está vinculada al Core.")
+        if new_extension and new_extension not in self.extensions_config:
+            self.extensions_config.append(new_extension)
+            ext_panel = IPTDatasetPanel(
+                self.notebook_ext,
+                title=f"Ext: {new_extension['tipo']}",
+                cfg=new_extension,
+                is_core=False,
+                on_structure_change=self.on_dataset_structure_changed
+            )
+            self.notebook_ext.add(ext_panel, text=new_extension['tipo'])
+            self.ext_tab_views.append(ext_panel)
 
     def ejecutar_guardado_exportacion(self):
         if not self.original_file_path or not self.core_config:
@@ -175,75 +207,41 @@ class IPTViewerWindow(tk.Frame):
             return
 
         try:
-            base_name = os.path.splitext(os.path.basename(self.original_file_path))[0]
-            ipt_transf_dir = os.path.join(output_base_dir, f"{base_name}IPTTransf")
-            old_dir = os.path.join(ipt_transf_dir, "Old")
-
-            os.makedirs(ipt_transf_dir, exist_ok=True)
-            os.makedirs(old_dir, exist_ok=True)
-
-            # 1. Copia del archivo original en la carpeta Old
-            shutil.copy2(self.original_file_path, os.path.join(old_dir, os.path.basename(self.original_file_path)))
-
-            # 2. Guardar tabla Core separada
-            core_file_path = os.path.join(ipt_transf_dir, f"Core_{self.core_config['tipo']}.txt")
-            with open(core_file_path, 'w', encoding=self.core_config.get('enc', 'utf-8')) as f_core:
-                f_core.write("\t".join(self.core_config['fields']) + "\n")
-                for row in self.core_config['rows']:
-                    f_core.write("\t".join([str(val) for val in row]) + "\n")
-
-            # 3. Guardar tablas de Extensiones separadas (brazos de la estrella)
-            for idx, ext in enumerate(self.extensions_config):
-                ext_file_path = os.path.join(ipt_transf_dir, f"Extension_{idx}_{ext['tipo']}.txt")
-                with open(ext_file_path, 'w', encoding=ext.get('enc', 'utf-8')) as f_ext:
-                    f_ext.write("\t".join(ext['fields']) + "\n")
-                    for row in ext['rows']:
-                        f_ext.write("\t".join([str(val) for val in row]) + "\n")
-
-            # 4. Exportación opcional a Excel
-            if self.var_excel.get():
-                excel_path = os.path.join(ipt_transf_dir, f"{base_name}_normalizado.xlsx")
-                try:
-                    import pandas as pd
-                    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-                        df_core = pd.DataFrame(self.core_config['rows'], columns=self.core_config['fields'])
-                        df_core.to_excel(writer, sheet_name=f"Core_{self.core_config['tipo']}", index=False)
-                        for idx, ext in enumerate(self.extensions_config):
-                            df_ext = pd.DataFrame(ext['rows'], columns=ext['fields'])
-                            df_ext.to_excel(writer, sheet_name=f"Ext_{idx}_{ext['tipo']}", index=False)
-                except Exception as ex:
-                    print(f"Error generando Excel: {ex}")
-
-            # 5. Exportación opcional a Access
-            if self.var_access.get():
-                access_info_path = os.path.join(ipt_transf_dir, "access_export_info.txt")
-                with open(access_info_path, 'w', encoding='utf-8') as f_acc:
-                    f_acc.write("Exportación a Access solicitada. Tablas Core y Extensiones separadas listas para vincular.")
+            ipt_transf_dir = export_project(
+                output_base_dir, self.original_file_path, self.core_config,
+                self.extensions_config, excel=self.var_excel.get()
+            )
 
             messagebox.showinfo(
                 "Exportación Exitosa", 
                 f"Estructura creada correctamente en:\n{ipt_transf_dir}\n\n"
                 f"• Copia original en carpeta 'Old'\n"
-                f"• Tablas Core y Extensiones separadas guardadas.", 
+                "• Tablas y mapeos guardados (project.json).\n"
+                "No es un DwC-A completo: no incluye meta.xml ni eml.xml.",
                 parent=self
             )
 
             if messagebox.askyesno("Abrir Directorio", "¿Desea abrir la carpeta con los archivos generados?", parent=self):
-                os.startfile(ipt_transf_dir)
+                try:
+                    open_directory(ipt_transf_dir)
+                except OSError as exc:
+                    messagebox.showwarning("Abrir carpeta", str(exc), parent=self)
 
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo completar el proceso de exportación: {e}", parent=self)
 
 
 class IPTDatasetPanel(tk.Frame):
-    def __init__(self, parent, title, cfg, is_core, on_row_select=None):
+    def __init__(self, parent, title, cfg, is_core, on_row_select=None, on_structure_change=None):
         super().__init__(parent, padx=5, pady=5)
         self.cfg = cfg
+        self.title = title
         self.fields = list(cfg['fields'])
         self.rows = [list(r) for r in cfg['rows']]
         self.filtered_rows = list(self.rows)
         self.is_core = is_core
         self.on_row_select = on_row_select
+        self.on_structure_change = on_structure_change
         self.mapping_combos = []
 
         self.id_or_fk_col = cfg.get('id_col') if is_core else cfg.get('fk_col')
@@ -254,11 +252,19 @@ class IPTDatasetPanel(tk.Frame):
         if not self.ipt_terms:
             self.ipt_terms = ["coreID", "id", "name", "value", "remarks"]
 
-        header_frame = tk.Frame(self, bg="#f0f0f0", padx=5, pady=4)
+        header_frame = tk.Frame(self, bg="#e9ecef", padx=5, pady=4)
         header_frame.pack(fill="x", pady=(0, 3))
 
-        info_txt = f"📂 {title} | {'ID Principal: ' if is_core else 'FK Core: '}{self.id_or_fk_col}"
-        tk.Label(header_frame, text=info_txt, font=("Segoe UI", 9, "bold"), bg="#f0f0f0", fg="#222222").pack(side="left")
+        info_txt = f"📂 {title} | {'ID Principal: ' if is_core else 'FK Core: '}{self.id_or_fk_col}  (💡 Doble clic aquí para Analizar/Reestructurar)"
+        
+        self.lbl_title = tk.Label(header_frame, text=info_txt, font=("Segoe UI", 9, "bold"), bg="#e9ecef", fg="#1f6fb2", cursor="hand2")
+        self.lbl_title.pack(side="left")
+
+        # Vincular doble clic en el título y en el marco de la cabecera
+        self.lbl_title.bind("<Double-Button-1>", lambda e: self.disparar_analizador_desde_panel())
+        header_frame.bind("<Double-Button-1>", lambda e: self.disparar_analizador_desde_panel())
+
+        ToolTip(self.lbl_title, lambda: "Haga DOBLE CLIC sobre este título para abrir el Asistente de Análisis de Tablas y Reestructuración.")
 
         if not is_core:
             tk.Button(
@@ -301,6 +307,50 @@ class IPTDatasetPanel(tk.Frame):
         self.mapping_inner_frame.update_idletasks()
         self.canvas_mapping.config(scrollregion=self.canvas_mapping.bbox("all"))
 
+    def disparar_analizador_desde_panel(self):
+        """Abre el asistente de análisis estructural al hacer doble clic en el título del panel."""
+        if not self.is_core:
+            messagebox.showinfo(
+                "Normalización", "La extracción se realiza desde el Core. "
+                "Reestructurar extensiones requiere definir su relación con el Core.",
+                parent=self
+            )
+            return
+        dialog = MultiRecordSplitterDialog(
+            self.winfo_toplevel(), 
+            self.fields, 
+            self.rows, 
+            self.id_or_fk_col, 
+            dataset_name=self.cfg['tipo']
+        )
+        self.winfo_toplevel().wait_window(dialog)
+
+        if getattr(dialog, "changed", False):
+            self.fields = list(dialog.headers)
+            self.cfg["fields"] = list(self.fields)
+            self.cfg["mapping"] = {
+                field: term for field, term in self.cfg.get("mapping", {}).items()
+                if field in self.fields
+            }
+            for widget in self.mapping_inner_frame.winfo_children():
+                widget.destroy()
+            self.mapping_combos = []
+            self.setup_columns_and_mappings()
+            self.actualizar_filas(dialog.clean_rows)
+            self.mapping_inner_frame.update_idletasks()
+            self.canvas_mapping.config(scrollregion=self.canvas_mapping.bbox("all"))
+
+        if hasattr(dialog, "extracted_datasets") and dialog.extracted_datasets:
+            for new_ext in dialog.extracted_datasets:
+                if self.on_structure_change:
+                    self.on_structure_change(new_ext)
+
+    def actualizar_filas(self, nuevas_filas):
+        self.rows = [list(r) for r in nuevas_filas]
+        self.cfg["rows"] = [list(r) for r in self.rows]
+        self.filtered_rows = list(self.rows)
+        self.actualizar_vista_tabla()
+
     def on_horizontal_scroll(self, *args):
         self.tree.xview(*args)
         self.canvas_mapping.xview(*args)
@@ -322,11 +372,11 @@ class IPTDatasetPanel(tk.Frame):
 
             is_fk_column = (not self.is_core and col_name.lower() == str(self.id_or_fk_col).lower())
 
-            cb = ttk.Combobox(cell_frame, values=self.ipt_terms, state="disabled" if is_fk_column else "readonly", font=("Segoe UI", 8))
+            cb = ttk.Combobox(cell_frame, values=[UNMAPPED] + self.ipt_terms, state="disabled" if is_fk_column else "readonly", font=("Segoe UI", 8))
             cb.pack(fill="both", expand=True)
 
             if is_fk_column:
-                cb.set("coreID" if "coreID" in self.ipt_terms else self.ipt_terms[0])
+                cb.set("coreID")
             else:
                 cb.set("(Sin mapear)")
 
@@ -341,37 +391,47 @@ class IPTDatasetPanel(tk.Frame):
             cb.bind("<Enter>", on_enter)
             cb.bind("<Leave>", on_leave)
 
-            def get_current_metadata(combo=cb, is_fk=is_fk_column):
+            def get_current_metadata(combo=cb, is_fk=is_fk_column, source_col=col_name):
                 val = combo.get()
                 if is_fk:
                     return "🔒 Clave Foránea (FK).\nMapeada permanentemente a 'coreID'."
                 if val == "(Sin mapear)":
-                    return f"Columna: '{col_name}'\nSeleccione un término Darwin Core."
+                    return f"Columna: '{source_col}'\nSeleccione un término Darwin Core."
                 meta = get_term_metadata(self.cfg['tipo'], val, is_core=self.is_core)
                 return f"📌 Término: {meta.get('label')}\n\n📖 Definición:\n{meta.get('definition')}\n\n💡 Ejemplo:\n{meta.get('example')}"
 
             ToolTip(cell_frame, get_current_metadata)
             ToolTip(cb, get_current_metadata)
 
+            self.mapping_combos.append(cb)
             if not is_fk_column:
                 cb.bind("<<ComboboxSelected>>", lambda e, combo=cb: self.on_mapping_selected(combo))
-                self.mapping_combos.append(cb)
 
                 for term in self.ipt_terms:
                     if term.lower() == col_name.lower():
                         cb.set(term)
                         break
+                cb.set(self.cfg.get("mapping", {}).get(col_name, cb.get()))
+        self.persist_mapping()
+
+    def persist_mapping(self):
+        self.cfg["mapping"] = {
+            field: combo.get() for field, combo in zip(self.fields, self.mapping_combos)
+        }
 
     def on_mapping_selected(self, selected_combo):
         chosen_val = selected_combo.get()
         if chosen_val == "(Sin mapear)":
+            self.persist_mapping()
             return
 
         for cb in self.mapping_combos:
             if cb != selected_combo and cb.get() == chosen_val:
                 messagebox.showwarning("Término Duplicado", f"El término '{chosen_val}' ya está asignado.", parent=self)
                 selected_combo.set("(Sin mapear)")
+                self.persist_mapping()
                 return
+        self.persist_mapping()
 
     def ordenar_columna(self, col_idx, col_name, reverse):
         try:
@@ -426,28 +486,12 @@ class IPTDatasetPanel(tk.Frame):
                     self.tree.insert("", "end", values=row)
                 return
 
-            row_map = {}
-            children_map = {}
-            roots = []
-
-            for row in self.filtered_rows:
-                r_id = str(row[self_id_idx])
-                p_id = str(row[self_parent_idx]) if len(row) > self_parent_idx else ""
-                row_map[r_id] = row
-
-                if not p_id or p_id == "" or p_id not in [str(r[self_id_idx]) for r in self.filtered_rows]:
-                    roots.append(r_id)
-                else:
-                    if p_id not in children_map:
-                        children_map[p_id] = []
-                    children_map[p_id].append(r_id)
-
-            def insert_recursive(parent_node, r_id):
-                row_vals = row_map[r_id]
-                node_id = self.tree.insert(parent_node, "end", text=r_id, values=row_vals)
-                if r_id in children_map:
-                    for child_id in children_map[r_id]:
-                        insert_recursive(node_id, child_id)
-
-            for r_id in roots:
-                insert_recursive("", r_id)
+            nodes = {}
+            for parent, index in hierarchy_entries(
+                self.filtered_rows, self_id_idx, self_parent_idx
+            ):
+                row = self.filtered_rows[index]
+                nodes[index] = self.tree.insert(
+                    nodes.get(parent, ""), "end",
+                    text=str(row[self_id_idx]), values=row
+                )

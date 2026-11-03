@@ -1,69 +1,67 @@
-"""
-ipt_loader.py
-=============
-Inspección y carga robusta de archivos Core y Extensiones para DwC-A / IPT.
-"""
+"""Lectura tabular consistente, sin sustitución silenciosa de caracteres."""
 
-import os
 import csv
+import io
+from collections import Counter
+from itertools import islice
 
-def detect_encoding_and_delimiter(filepath):
-    encoding_to_try = ['utf-8-sig', 'utf-8', 'cp1252', 'latin-1']
-    content = None
-    used_encoding = 'utf-8'
 
-    for enc in encoding_to_try:
+def detectar_delimitador(sample_text):
+    """Respeta campos entrecomillados antes de recurrir a la primera fila."""
+    try:
+        return csv.Sniffer().sniff(sample_text, delimiters="\t,;").delimiter
+    except csv.Error:
+        first = sample_text.splitlines()[0] if sample_text.splitlines() else ""
+        counts = {d: len(next(csv.reader([first], delimiter=d))) for d in "\t,;"}
+        return max(counts, key=counts.get)
+
+
+def _decode(file_path):
+    with open(file_path, "rb") as source:
+        raw = source.read()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
         try:
-            with open(filepath, 'r', encoding=enc) as f:
-                content = f.read(2048)
-                used_encoding = enc
-                break
-        except Exception:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
             continue
+    raise ValueError("No se pudo descodificar el fichero.")
 
-    if content is None:
-        return '\t', 'utf-8'
 
-    lines = content.splitlines()
-    first_line = lines[0] if lines else ""
-    
-    counts = {
-        ';': first_line.count(';'),
-        '\t': first_line.count('\t'),
-        ',': first_line.count(',')
-    }
-    
-    delimiter = max(counts, key=counts.get)
-    if counts[delimiter] == 0:
-        delimiter = '\t'
-
-    return delimiter, used_encoding
-
-def inspect_file_headers(filepath):
-    delim, enc = detect_encoding_and_delimiter(filepath)
+def _read(file_path, limit=None):
+    text = _decode(file_path)
+    if not text.strip():
+        raise ValueError("El archivo está vacío.")
+    delimiter = detectar_delimitador(text[:65536])
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
     try:
-        with open(filepath, encoding=enc, errors="replace") as f:
-            r = csv.reader(f, delimiter=delim)
-            first_line = next(r, None)
-            if first_line:
-                return [col.strip() for col in first_line], delim, enc
-    except Exception:
-        pass
-    return [], '\t', 'utf-8'
+        headers = [h.strip() for h in next(reader)]
+        if not headers or any(not h for h in headers):
+            raise ValueError("Hay cabeceras vacías. Asigne un nombre a cada columna.")
+        duplicates = [h for h, n in Counter(h.casefold() for h in headers).items() if n > 1]
+        if duplicates:
+            raise ValueError("Cabeceras duplicadas: " + ", ".join(duplicates))
+        rows = []
+        iterator = reader if limit is None else islice(reader, limit)
+        for row in iterator:
+            if not row or not any(cell.strip() for cell in row):
+                continue
+            if len(row) != len(headers):
+                raise ValueError(
+                    f"Línea {reader.line_num}: se esperaban {len(headers)} "
+                    f"columnas y se encontraron {len(row)}."
+                )
+            rows.append(row)
+        return headers, rows
+    except csv.Error as exc:
+        raise ValueError(f"CSV no válido cerca de la línea {reader.line_num}: {exc}") from exc
 
-def load_file_data(filepath):
-    headers, delim, enc = inspect_file_headers(filepath)
-    rows = []
-    try:
-        with open(filepath, encoding=enc, errors="replace") as f:
-            r = csv.reader(f, delimiter=delim)
-            header_row = next(r, None)
-            for row in r:
-                if not row:
-                    continue
-                if len(row) < len(headers):
-                    row += [""] * (len(headers) - len(row))
-                rows.append(row)
-    except Exception:
-        pass
-    return headers, rows, enc, delim
+
+def inspect_file_headers(file_path, num_lines=5):
+    """Devuelve cabeceras y una vista previa de registros lógicos completos."""
+    return _read(file_path, max(0, num_lines - 1))
+
+
+def load_file_data(file_path):
+    return _read(file_path)
