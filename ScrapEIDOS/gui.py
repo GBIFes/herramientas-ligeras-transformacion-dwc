@@ -21,7 +21,60 @@ from cartografia import (
     guardar_cartografia, generar_mapa, abrir_mapa,
 )
 
+
+class VentanaProgresoModal:
+    """Ventana emergente modal con barra de progreso reutilizable."""
+    def __init__(self, parent, titulo="Cargando datos...", mensaje="Procesando registros, por favor espera..."):
+        self.top = tk.Toplevel(parent)
+        self.top.title(titulo)
+        self.top.geometry("450x150")
+        self.top.resizable(False, False)
+        self.top.transient(parent)
+        self.top.grab_set()
+        
+        # Centrar la ventana respecto al padre
+        self.top.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - 225
+        y = parent.winfo_rooty() + (parent.winfo_height() // 2) - 75
+        self.top.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        self.lbl_mensaje = tk.Label(self.top, text=mensaje, font=("Segoe UI", 9, "bold"), fg="#333333", wraplength=420, justify="left")
+        self.lbl_mensaje.pack(pady=(15, 5), padx=20, anchor="w")
+
+        self.lbl_detalle = tk.Label(self.top, text="Iniciando...", font=("Segoe UI", 8), fg="#666666", anchor="w")
+        self.lbl_detalle.pack(pady=(0, 5), padx=20, fill="x")
+
+        self.progress = ttk.Progressbar(self.top, orient="horizontal", length=400, mode="determinate")
+        self.progress.pack(pady=(5, 15), padx=20)
+
+    def actualizar(self, valor, maximo, detalle=""):
+        if maximo > 0:
+            self.progress.config(maximum=maximo, value=valor)
+        if detalle:
+            self.lbl_detalle.config(text=detalle)
+        self.top.update_idletasks()
+
+    def set_indeterminado(self, activo=True):
+        if activo:
+            self.progress.config(mode="indeterminate")
+            self.progress.start(10)
+        else:
+            self.progress.stop()
+            self.progress.config(mode="determinate")
+
+    def cerrar(self):
+        try:
+            self.progress.stop()
+            self.top.grab_release()
+            self.top.destroy()
+        except Exception:
+            pass
+
+
 def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_window, progress_bar, lbl_progreso, btn_ejecutar, callback_fin, incluir_cartografia=True, nivel_precision="Estándar (Paginación normal - Recomendado)"):
+    # Crear ventana emergente de progreso
+    modal = VentanaProgresoModal(root_window, titulo="Ejecutando Extracción EIDOS", mensaje="Extrayendo datos de EIDOS...")
+
     def proceso():
         encoding = detectar_codificacion(ruta_csv)
         dialect = detectar_dialect(ruta_csv)
@@ -29,6 +82,7 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         try:
             df = pd.read_csv(ruta_csv, sep=dialect.delimiter, dtype=str, encoding=encoding, engine="python")
         except Exception as e:
+            root_window.after(0, lambda: modal.cerrar())
             root_window.after(0, lambda error=str(e): messagebox.showerror("Error", f"No se pudo leer el archivo:\n{error}"))
             root_window.after(0, lambda: btn_ejecutar.config(state=tk.NORMAL))
             return
@@ -39,14 +93,19 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         if "taxonId" not in df.columns:
             df["taxonId"] = ""
 
-        if col_busqueda not in df.columns:
-            root_window.after(0, lambda: messagebox.showerror("Error", "La columna seleccionada no existe."))
+        if col_busqueda not in df.columns and tipo_busqueda not in df.columns:
+            root_window.after(0, lambda: modal.cerrar())
+            root_window.after(0, lambda: messagebox.showerror("Error", "Las columnas seleccionadas no existen en el archivo."))
             root_window.after(0, lambda: btn_ejecutar.config(state=tk.NORMAL))
             return
 
         total_filas = len(df)
         completados = [0]
-        root_window.after(0, lambda: progress_bar.config(maximum=total_filas, value=0))
+        
+        root_window.after(0, lambda: [
+            progress_bar.config(maximum=total_filas, value=0),
+            modal.actualizar(0, total_filas, f"0 de {total_filas} registros procesados")
+        ])
 
         lista_nombres, lista_info, lista_cons, lista_col, lista_legal, lista_bib, lista_sin = [], [], [], [], [], [], []
         headers_cons_guardado, headers_col_guardado, headers_legal_guardado, headers_bib_guardado = [], [], [], []
@@ -57,7 +116,10 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
             if not filas_pendientes:
                 break
             if intento > 0:
-                root_window.after(0, lambda: lbl_progreso.config(text=f"Reintentando {len(filas_pendientes)} registros pendientes..."))
+                root_window.after(0, lambda: [
+                    lbl_progreso.config(text=f"Reintentando {len(filas_pendientes)} registros pendientes..."),
+                    modal.actualizar(completados[0], total_filas, f"Reintentando {len(filas_pendientes)} registros pendientes...")
+                ])
 
             futures_map = {}
             max_w = 8 if intento == 0 else 1
@@ -102,10 +164,13 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
 
                     completados[0] += 1
                     prog = min(completados[0], total_filas)
-                    por = int((prog / total_filas) * 100)
-                    root_window.after(0, lambda p=prog, tf=total_filas, p_ct=por: [
+                    por = int((prog / total_filas) * 100) if total_filas > 0 else 100
+                    txt_estado = f"Procesando registros: {prog}/{total_filas} ({por}%)"
+                    
+                    root_window.after(0, lambda p=prog, tf=total_filas, msg=txt_estado: [
                         progress_bar.config(value=p),
-                        lbl_progreso.config(text=f"Procesando registros: {p}/{tf} ({p_ct}%)")
+                        lbl_progreso.config(text=msg),
+                        modal.actualizar(p, tf, msg)
                     ])
 
         def crear_df_seguro(lista_datos, cabeceras_guardadas):
@@ -124,11 +189,16 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         df_estado_mem = pd.DataFrame(columns=COLUMNAS_ESTADO)
 
         if incluir_cartografia:
-            root_window.after(0, lambda: lbl_progreso.config(text="Descargando cartografía WFS..."))
+            root_window.after(0, lambda: [
+                lbl_progreso.config(text="Descargando cartografía WFS..."),
+                modal.actualizar(0, len(df["EIDOS_ID"].tolist()), "Descargando cartografía WFS...")
+            ])
             def progreso_carto(n, total):
-                root_window.after(0, lambda n=n, total=total: [
+                txt_c = f"Cartografía: {n}/{total} taxones descargados"
+                root_window.after(0, lambda n=n, total=total, t=txt_c: [
                     progress_bar.config(maximum=max(total, 1), value=n),
-                    lbl_progreso.config(text=f"Cartografía: {n}/{total} taxones"),
+                    lbl_progreso.config(text=t),
+                    modal.actualizar(n, total, t)
                 ])
             
             df_coord_mem, geojson_mem, df_estado_mem = recopilar_coordenadas(
@@ -155,6 +225,7 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         df_sin_mem = pd.DataFrame(lista_sin, columns=["EIDOS_ID", "taxonId", "Sinonimo_EIDOS_ID", "Sinonimo_taxonId", "Nombre_Sinonimo"])
 
         root_window.after(0, lambda: [
+            modal.cerrar(),
             btn_ejecutar.config(state=tk.NORMAL),
             progress_bar.config(value=0),
             lbl_progreso.config(text="¡Proceso finalizado! Abriendo visor..."),
@@ -167,6 +238,7 @@ def ejecutar_scraping(ruta_csv, dir_salida, col_busqueda, tipo_busqueda, root_wi
         ])
 
     threading.Thread(target=proceso, daemon=True).start()
+
 
 def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, df_bi, df_si, dir_salida, ruta_csv, root_main, df_coord=None, geojson=None, df_estado=None):
     df_coord = df_coord if df_coord is not None else pd.DataFrame(columns=COLUMNAS_COORD)
@@ -313,95 +385,107 @@ def abrir_visor_access(df_input, df_output, df_inf, df_con, df_collec, df_leg, d
         tree_estado, cols_estado = crear_pestana_tree_desde_df("🗺️ Estado cartografía", df_estado)
         tree_coord, cols_coord = crear_pestana_tree_desde_df("📍 Coordenadas", df_coord)
 
-    def actualizar_vista():
+    def ejecutar_refresco_panel():
+        """Refresca el panel de datos mostrando una ventana emergente de progreso."""
         if total_registros == 0:
             return
-        idx = current_idx["val"]
-        row = df_input.iloc[idx]
 
-        for col in input_columns:
-            val_text = str(row.get(col, ""))
-            labels_left_values[col].config(text=val_text if val_text else "-")
+        modal_refresco = VentanaProgresoModal(visor, titulo="Actualizando Vista", mensaje="Cargando los datos del registro...")
+        modal_refresco.set_indeterminado(True)
 
-        e_id = str(row.get("EIDOS_ID", "")).strip()
+        def actualizar_logica():
+            idx = current_idx["val"]
+            row = df_input.iloc[idx]
 
-        lista_trees = [tree_nombres, tree_cons, tree_col, tree_legal, tree_bib, tree_sin]
-        if hay_cartografia:
-            lista_trees.extend([tree_estado, tree_coord])
+            for col in input_columns:
+                val_text = str(row.get(col, ""))
+                labels_left_values[col].config(text=val_text if val_text else "-")
 
-        for t in lista_trees:
-            if t:
-                for item in t.get_children():
-                    t.delete(item)
+            e_id = str(row.get("EIDOS_ID", "")).strip()
 
-        for widget in scrollable_frame_info.winfo_children():
-            widget.destroy()
+            lista_trees = [tree_nombres, tree_cons, tree_col, tree_legal, tree_bib, tree_sin]
+            if hay_cartografia:
+                lista_trees.extend([tree_estado, tree_coord])
 
-        def poblar_tree(df_target, tree_target, columnas_tree):
-            if tree_target and not df_target.empty and e_id and "EIDOS_ID" in df_target.columns:
-                filtrados = df_target[df_target["EIDOS_ID"].astype(str).str.strip() == e_id]
-                for _, r in filtrados.iterrows():
-                    vals = [r.get(c, "") for c in columnas_tree]
-                    tree_target.insert("", "end", values=vals)
+            for t in lista_trees:
+                if t:
+                    for item in t.get_children():
+                        t.delete(item)
 
-        poblar_tree(df_output, tree_nombres, cols_nombres)
-        
-        puntos = df_coord[df_coord["taxonId"].astype(str) == e_id] if not df_coord.empty else pd.DataFrame()
-        if hay_cartografia:
-            poblar_tree(df_estado, tree_estado, cols_estado)
-            for _, punto in puntos.iterrows():
-                tree_coord.insert("", "end", values=[
-                    f"{punto[c]:.8f}" if c in ("latdecimal", "longdecimal") else punto[c]
-                    for c in cols_coord
-                ])
-        
-        if not puntos.empty:
-            btn_mapa.config(state="normal")
-            lbl_carto.config(text=f"🌐 {len(puntos)} cuadrículas encontradas. Coordenadas WGS84 de sus centros.")
-        else:
-            btn_mapa.config(state="disabled")
-            estado = df_estado[df_estado["EIDOS_ID"].astype(str) == e_id] if not df_estado.empty else pd.DataFrame()
-            if not estado.empty and estado.iloc[0]["estado"] == "error":
-                lbl_carto.config(text="⚠️ Error de consulta WFS. Consulta la pestaña 'Estado cartografía'.")
-            elif not estado.empty:
-                lbl_carto.config(text="Sin cuadrículas de distribución registradas para este taxón.")
+            for widget in scrollable_frame_info.winfo_children():
+                widget.destroy()
+
+            def poblar_tree(df_target, tree_target, columnas_tree):
+                if tree_target and not df_target.empty and e_id and "EIDOS_ID" in df_target.columns:
+                    filtrados = df_target[df_target["EIDOS_ID"].astype(str).str.strip() == e_id]
+                    for _, r in filtrados.iterrows():
+                        vals = [r.get(c, "") for c in columnas_tree]
+                        tree_target.insert("", "end", values=vals)
+
+            poblar_tree(df_output, tree_nombres, cols_nombres)
+            
+            puntos = df_coord[df_coord["taxonId"].astype(str) == e_id] if not df_coord.empty else pd.DataFrame()
+            if hay_cartografia:
+                poblar_tree(df_estado, tree_estado, cols_estado)
+                for _, punto in puntos.iterrows():
+                    tree_coord.insert("", "end", values=[
+                        f"{punto[c]:.8f}" if c in ("latdecimal", "longdecimal") else punto[c]
+                        for c in cols_coord
+                    ])
+            
+            if not puntos.empty:
+                btn_mapa.config(state="normal")
+                lbl_carto.config(text=f"🌐 {len(puntos)} cuadrículas encontradas. Coordenadas WGS84 de sus centros.")
             else:
-                lbl_carto.config(text="Cartografía no descargada o sin datos.")
+                btn_mapa.config(state="disabled")
+                estado = df_estado[df_estado["EIDOS_ID"].astype(str) == e_id] if not df_estado.empty else pd.DataFrame()
+                if not estado.empty and estado.iloc[0]["estado"] == "error":
+                    lbl_carto.config(text="⚠️ Error de consulta WFS. Consulta la pestaña 'Estado cartografía'.")
+                elif not estado.empty:
+                    lbl_carto.config(text="Sin cuadrículas de distribución registradas para este taxón.")
+                else:
+                    lbl_carto.config(text="Cartografía no descargada o sin datos.")
 
-        if not df_inf.empty and e_id and "EIDOS_ID" in df_inf.columns:
-            match_info = df_inf[df_inf["EIDOS_ID"].astype(str).str.strip() == e_id]
-            if not match_info.empty:
-                r_inf = match_info.iloc[0]
-                anchura_canvas = canvas_info.winfo_width()
-                wrap_val = max(anchura_canvas - 180, 300)
+            if not df_inf.empty and e_id and "EIDOS_ID" in df_inf.columns:
+                match_info = df_inf[df_inf["EIDOS_ID"].astype(str).str.strip() == e_id]
+                if not match_info.empty:
+                    r_inf = match_info.iloc[0]
+                    anchura_canvas = canvas_info.winfo_width()
+                    wrap_val = max(anchura_canvas - 180, 300)
 
-                for k, v in r_inf.items():
-                    if k != "EIDOS_ID" and str(v).strip():
-                        f_item = tk.Frame(scrollable_frame_info, bg="white")
-                        f_item.pack(fill="x", pady=3, padx=2)
-                        
-                        lbl_k = tk.Label(f_item, text=f"{k}:", font=("Segoe UI", 9, "bold"), bg="white", fg="#333333", anchor="w", width=18)
-                        lbl_k.pack(side="left", anchor="n")
-                        
-                        lbl_v = tk.Label(f_item, text=str(v), font=("Segoe UI", 9), bg="white", fg="#111111", anchor="w", justify="left", wraplength=wrap_val)
-                        lbl_v.pack(side="left", fill="x", expand=True, anchor="w")
+                    for k, v in r_inf.items():
+                        if k != "EIDOS_ID" and str(v).strip():
+                            f_item = tk.Frame(scrollable_frame_info, bg="white")
+                            f_item.pack(fill="x", pady=3, padx=2)
+                            
+                            lbl_k = tk.Label(f_item, text=f"{k}:", font=("Segoe UI", 9, "bold"), bg="white", fg="#333333", anchor="w", width=18)
+                            lbl_k.pack(side="left", anchor="n")
+                            
+                            lbl_v = tk.Label(f_item, text=str(v), font=("Segoe UI", 9), bg="white", fg="#111111", anchor="w", justify="left", wraplength=wrap_val)
+                            lbl_v.pack(side="left", fill="x", expand=True, anchor="w")
 
-        poblar_tree(df_con, tree_cons, cols_cons)
-        poblar_tree(df_collec, tree_col, cols_col)
-        poblar_tree(df_leg, tree_legal, cols_legal)
-        poblar_tree(df_bi, tree_bib, cols_bib)
-        poblar_tree(df_si, tree_sin, cols_sin)
+            poblar_tree(df_con, tree_cons, cols_cons)
+            poblar_tree(df_collec, tree_col, cols_col)
+            poblar_tree(df_leg, tree_legal, cols_legal)
+            poblar_tree(df_bi, tree_bib, cols_bib)
+            poblar_tree(df_si, tree_sin, cols_sin)
 
-        if e_id:
-            url_ficha_actual["link"] = f"{BASE_URL}/{e_id}"
-            lbl_enlace.config(text=f"🔗 Abrir ficha de EIDOS (ID: {e_id})", fg="blue")
-        else:
-            url_ficha_actual["link"] = ""
-            lbl_enlace.config(text="🔗 Ficha de EIDOS no disponible", fg="gray")
+            if e_id:
+                url_ficha_actual["link"] = f"{BASE_URL}/{e_id}"
+                lbl_enlace.config(text=f"🔗 Abrir ficha de EIDOS (ID: {e_id})", fg="blue")
+            else:
+                url_ficha_actual["link"] = ""
+                lbl_enlace.config(text="🔗 Ficha de EIDOS no disponible", fg="gray")
 
-        lbl_estado.config(text=f"Registro {idx + 1} de {total_registros}")
-        entry_ir.delete(0, tk.END)
-        entry_ir.insert(0, str(idx + 1))
+            lbl_estado.config(text=f"Registro {idx + 1} de {total_registros}")
+            entry_ir.delete(0, tk.END)
+            entry_ir.insert(0, str(idx + 1))
+
+            modal_refresco.cerrar()
+
+        visor.after(50, actualizar_logica)
+
+    actualizar_vista = ejecutar_refresco_panel
 
     frame_nav = tk.Frame(visor, bd=1, relief=tk.RAISED, pady=5)
     frame_nav.pack(fill="x", side="bottom", padx=10, pady=5)

@@ -2,8 +2,9 @@
 gui.py
 ======
 
-EIDOS Multivisor - Interfaz gráfica con barra de progreso de descarga,
-selección masiva de grupos, persistencia y recarga.
+EIDOS Multivisor - Interfaz gráfica con ventana emergente de progreso,
+selección masiva de grupos, persistencia, recarga y el botón "Exportar a DwCa" 
+con selector de directorio.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import pandas as pd
 
 from data_explorer import DataExplorer
 from exporter import Exporter
+from dwca_bridge import DwCaBridge
 
 
 CHECK_OFF = "☐"
@@ -28,6 +30,45 @@ EIDOS_WEB = (
     "especies-silvestres/"
     "eidos/"
 )
+
+
+class ProgressWindow:
+    """Ventana emergente modal con barra de progreso para cargas y refrescos."""
+    def __init__(self, parent, title="Procesando..."):
+        self.top = tk.Toplevel(parent)
+        self.top.title(title)
+        self.top.geometry("450x150")
+        self.top.resizable(False, False)
+        self.top.transient(parent)
+        self.top.grab_set()
+
+        self.top.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - 225
+        y = parent.winfo_rooty() + (parent.winfo_height() // 2) - 75
+        self.top.geometry(f"+{x}+{y}")
+
+        self.label_var = tk.StringVar(value="Preparando operación...")
+        ttk.Label(self.top, textvariable=self.label_var, font=("Segoe UI", 10)).pack(pady=(20, 10), padx=20, anchor="w")
+
+        self.progress = ttk.Progressbar(self.top, orient="horizontal", length=400, mode="determinate")
+        self.progress.pack(pady=10, padx=20)
+
+    def update_progress(self, current, total, text=""):
+        if total > 0:
+            self.progress["maximum"] = total
+            self.progress["value"] = current
+            pct = int((current / total) * 100)
+            if not text:
+                text = f"Progreso: {current}/{total} ({pct}%)"
+        self.label_var.set(text)
+        self.top.update_idletasks()
+
+    def close(self):
+        try:
+            self.top.grab_release()
+            self.top.destroy()
+        except Exception:
+            pass
 
 
 class EidosTabManager:
@@ -57,7 +98,6 @@ class EidosTabManager:
         paned.add(self.panel_left, weight=1)
         paned.add(self.panel_right, weight=4)
 
-        # Panel izquierdo (Árbol)
         ttk.Label(self.panel_left, text=f"Datasets ({self.view_name})").pack(anchor="w", padx=5, pady=5)
         
         container = ttk.Frame(self.panel_left)
@@ -82,7 +122,6 @@ class EidosTabManager:
 
         self.group_nodes = [self.node_nacional, self.node_internacional, self.node_autonomico, self.node_general]
 
-        # Panel derecho (Tabla)
         self.tree = ttk.Treeview(self.panel_right, show="headings")
         r_vsb = ttk.Scrollbar(self.panel_right, orient="vertical", command=self.tree.yview)
         r_hsb = ttk.Scrollbar(self.panel_right, orient="horizontal", command=self.tree.xview)
@@ -149,7 +188,9 @@ class EidosGUI:
         self.btn_export = ttk.Button(frame, text="Exportar vista actual", command=self.export_current)
         self.btn_export.pack(side=tk.LEFT, padx=3)
 
+        # Botones exclusivos de la vista LESRPE (Matriz Nacional y Exportar a DwCa)
         self.btn_matrix = ttk.Button(frame, text="Matriz Nacional", command=self.build_matrix)
+        self.btn_dwca_view = ttk.Button(frame, text="Exportar a DwCa", command=self.export_to_dwca)
 
         ttk.Label(frame, text="Columna:").pack(side=tk.LEFT, padx=(15, 2))
         self.filter_combo = ttk.Combobox(frame, textvariable=self.filter_column_var, state="readonly", width=16)
@@ -167,10 +208,6 @@ class EidosGUI:
 
         ttk.Label(status_frame, textvariable=self.status_var, anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Barra de progreso visual para descargas en paralelo
-        self.progress_bar = ttk.Progressbar(status_frame, orient="horizontal", length=250, mode="determinate")
-        # Inicialmente oculta hasta que inicie una descarga
-
     def get_active_tab(self) -> EidosTabManager:
         try:
             current_tab_text = self.notebook.tab(self.notebook.select(), "text")
@@ -184,12 +221,15 @@ class EidosGUI:
     def check_and_load_active_tab(self):
         tab = self.get_active_tab()
         if not tab.catalog_loaded:
+            progress_win = ProgressWindow(self.root, title=f"Catálogo - {tab.view_name}")
             def task():
                 self.status_var.set(f"Cargando catálogo para {tab.view_name}...")
+                progress_win.update_progress(0, 1, text=f"Cargando catálogo de {tab.view_name}...")
                 tab.explorer.load_catalog()
                 tree_data = tab.explorer.datasets_tree()
                 tab.catalog_loaded = True
                 self.root.after(0, lambda: self.populate_tree(tab, tree_data))
+                self.root.after(0, lambda: progress_win.close())
                 self.root.after(0, lambda: self.status_var.set(f"Catálogo de {tab.view_name} listo."))
             threading.Thread(target=task, daemon=True).start()
         else:
@@ -275,8 +315,7 @@ class EidosGUI:
             return
 
         total = len(tab.selected_datasets)
-        self.progress_bar.config(maximum=total, value=0)
-        self.progress_bar.pack(side=tk.RIGHT, padx=5)
+        progress_win = ProgressWindow(self.root, title=f"Cargando Datasets - {tab.view_name}")
 
         def task():
             import concurrent.futures
@@ -286,22 +325,20 @@ class EidosGUI:
             def fetch_single(ds_id):
                 nonlocal completed
                 try:
-                    df = tab.explorer.api.get_dataset(ds_id, view_name=tab.view_name)
-                    return df
+                    df = tab.explorer.load_datasets([ds_id])
+                    return df if not df.empty else None
                 except Exception:
                     return None
                 finally:
                     completed += 1
-                    self.root.after(0, lambda c=completed: update_progress_ui(c, total))
-
-            def update_progress_ui(c, tot):
-                self.progress_bar['value'] = c
-                pct = int((c / tot) * 100)
-                self.status_var.set(f"Descargando en paralelo... {c}/{tot} datasets ({pct}%)")
+                    pct = int((completed / total) * 100)
+                    self.root.after(0, lambda c=completed, t=total, p=pct: progress_win.update_progress(
+                        c, t, text=f"Descargando datasets... {c}/{t} completados ({p}%)"
+                    ))
 
             max_workers = min(10, total)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                results = executor.map(fetch_single, sorted(tab.selected_datasets))
+                results = executor.map(lambda ds: tab.explorer.load_datasets([ds]), sorted(tab.selected_datasets))
                 for df in results:
                     if df is not None and not df.empty:
                         frames.append(df)
@@ -330,7 +367,7 @@ class EidosGUI:
                 else:
                     tab.current_df = df_all.copy()
 
-                self.progress_bar.pack_forget()
+                progress_win.close()
                 self.setup_filter_columns()
                 self.refresh_table(tab)
                 self.status_var.set(f"Carga completa: {len(tab.current_df):,} registros mostrados.")
@@ -418,19 +455,59 @@ class EidosGUI:
         
         if tab.view_name == "v_estadolegal":
             self.btn_matrix.pack(side=tk.LEFT, padx=3)
+            self.btn_dwca_view.pack(side=tk.LEFT, padx=3)
         else:
             self.btn_matrix.pack_forget()
+            self.btn_dwca_view.pack_forget()
 
     def build_matrix(self):
         tab = self.get_active_tab()
+        progress_win = ProgressWindow(self.root, title="Construyendo Matriz Nacional")
         def task():
             self.status_var.set("Construyendo matriz nacional...")
+            progress_win.update_progress(0, 1, text="Procesando datos para matriz nacional...")
             df = tab.explorer.national_matrix()
             tab.unfiltered_df = df.copy()
             tab.current_df = df.copy()
+            self.root.after(0, lambda: progress_win.close())
             self.root.after(0, self.setup_filter_columns)
             self.root.after(0, lambda: self.refresh_table(tab))
             self.root.after(0, lambda: self.status_var.set("Matriz nacional generada."))
+        threading.Thread(target=task, daemon=True).start()
+
+    def export_to_dwca(self):
+        """
+        Permite seleccionar un directorio de destino y exporta los datos activos 
+        al paquete Darwin Core mediante DwCaBridge.
+        """
+        tab = self.get_active_tab()
+        if tab.current_df is None or tab.current_df.empty:
+            messagebox.showwarning("Aviso", "No hay datos cargados en esta vista para exportar a DwCa.")
+            return
+
+        directory = filedialog.askdirectory(title="Seleccione directorio para guardar el paquete DwCa")
+        if not directory:
+            return
+
+        progress_win = ProgressWindow(self.root, title="Exportando a Darwin Core")
+        def task():
+            self.status_var.set("Generando paquete Darwin Core (DwCa)...")
+            progress_win.update_progress(0, 1, text="Estructurando Core y Extensiones...")
+            
+            try:
+                bridge = DwCaBridge(directory)
+                zip_path = bridge.export_dwca_package(tab.current_df, f"eidos_{tab.view_name}")
+                
+                self.root.after(0, lambda: progress_win.close())
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Exportación Exitosa", 
+                    f"El paquete DwCa se ha guardado correctamente en:\n\n{zip_path}"
+                ))
+                self.root.after(0, lambda: self.status_var.set(f"Paquete DwCa guardado en: {zip_path.parent}"))
+            except Exception as ex:
+                self.root.after(0, lambda: progress_win.close())
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Error al generar el paquete DwCa: {ex}"))
+
         threading.Thread(target=task, daemon=True).start()
 
     def open_selected_record(self, tab: EidosTabManager):
@@ -463,10 +540,13 @@ class EidosGUI:
         if not directory:
             return
 
+        progress_win = ProgressWindow(self.root, title="Exportando datos")
         def task():
             self.status_var.set("Exportando datos...")
+            progress_win.update_progress(0, 1, text="Generando ficheros de exportación...")
             exporter = Exporter(directory)
             exporter.export_all_and_open(tab.current_df, f"eidos_{tab.view_name}")
+            self.root.after(0, lambda: progress_win.close())
             self.root.after(0, lambda: messagebox.showinfo("Exportación", "Archivos generados con éxito."))
         threading.Thread(target=task, daemon=True).start()
 

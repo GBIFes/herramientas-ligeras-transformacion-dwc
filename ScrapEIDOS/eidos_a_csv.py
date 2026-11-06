@@ -36,27 +36,47 @@ URL = "https://iepnb.gob.es/geoserver/especies/wfs"
 
 
 def normalizar_id(valor):
+    """Normaliza y valida los identificadores numéricos de EIDOS."""
     valor = str(valor).strip()
-    if not re.fullmatch(r"[0-9]+", valor):
+    # Eliminar posibles prefijos de URL o parámetros extras si se pasan accidentalmente
+    if "/eidos/" in valor:
+        valor = valor.split("/eidos/")[-1].strip("/")
+    match = re.search(r"(\d+)", valor)
+    if not match:
         raise ValueError(f"taxonId no válido: {valor!r}; se esperan dígitos.")
-    return str(int(valor))
+    # str(int(...)) garantiza eliminar ceros a la izquierda (ej. "010903" -> "10903")
+    return str(int(match.group(1)))
 
 
 def filtro_taxon(taxon_id):
     """Coincidencia de elemento completo en una lista separada por comas."""
-    taxon_id = normalizar_id(taxon_id)
+    taxon_id_norm = normalizar_id(taxon_id)
+    # Probar coincidencia con o sin ceros por flexibilidad en GeoServer
+    taxon_id_padded = taxon_id_norm.zfill(6)
+    
     campo = "lista_idstaxon_filtro"
-    return (
-        f"({campo} = '{taxon_id}' OR "
-        f"{campo} LIKE '{taxon_id},%' OR "
-        f"{campo} LIKE '%,{taxon_id},%' OR "
-        f"{campo} LIKE '%,{taxon_id}')"
+    filtro_norm = (
+        f"({campo} = '{taxon_id_norm}' OR "
+        f"{campo} LIKE '{taxon_id_norm},%' OR "
+        f"{campo} LIKE '%,{taxon_id_norm},%' OR "
+        f"{campo} LIKE '%,{taxon_id_norm}')"
     )
+    if taxon_id_padded != taxon_id_norm:
+        filtro_padded = (
+            f"({campo} = '{taxon_id_padded}' OR "
+            f"{campo} LIKE '{taxon_id_padded},%' OR "
+            f"{campo} LIKE '%,{taxon_id_padded},%' OR "
+            f"{campo} LIKE '%,{taxon_id_padded}')"
+        )
+        return f"({filtro_norm} OR {filtro_padded})"
+    return filtro_norm
 
 
 def consultar(session, taxon_id, page_size=1000):
     inicio = 0
     vistos = set()
+    taxon_id_clean = normalizar_id(taxon_id)
+    
     while True:
         params = {
             "service": "WFS",
@@ -66,28 +86,37 @@ def consultar(session, taxon_id, page_size=1000):
             "outputFormat": "application/json",
             "srsName": "EPSG:4326",
             "propertyName": "id,cuadricula,geom",
-            "CQL_FILTER": filtro_taxon(taxon_id),
+            "CQL_FILTER": filtro_taxon(taxon_id_clean),
             "sortBy": "id A",
             "count": page_size,
             "startIndex": inicio,
         }
         response = session.get(URL, params=params, timeout=(15, 120))
         response.raise_for_status()
+        
+        # Validar si GeoServer devolvió XML de error pese al status HTTP 200 OK
+        if response.text.strip().startswith("<"):
+            raise RuntimeError(
+                f"WFS devolvió XML en lugar de JSON para {taxon_id_clean}: {response.text[:500]}"
+            )
+            
         try:
             data = response.json()
         except ValueError as exc:
-            # GeoServer también puede devolver excepciones XML con HTTP 200.
             raise RuntimeError(
-                f"WFS no devolvió JSON para {taxon_id}: {response.text[:800]}"
+                f"WFS no devolvió JSON válido para {taxon_id_clean}: {response.text[:800]}"
             ) from exc
+
         if data.get("type") != "FeatureCollection":
             raise RuntimeError(f"Respuesta WFS inesperada: {str(data)[:800]}")
-        features = data["features"]
+            
+        features = data.get("features", [])
         if not features:
             total = str(data.get("numberMatched", "unknown"))
             if total.isdigit() and inicio < int(total):
                 raise RuntimeError("El WFS terminó antes del total anunciado.")
             break
+
         for feature in features:
             clave = feature["properties"]["id"]
             if clave in vistos:
@@ -96,12 +125,11 @@ def consultar(session, taxon_id, page_size=1000):
                 )
             vistos.add(clave)
             yield feature
+
         inicio += len(features)
         total = str(data.get("numberMatched", "unknown"))
         if total.isdigit() and inicio >= int(total):
             break
-        # Si el total es desconocido, continuar hasta recibir una página vacía.
-        # No asumir que el servidor respeta el tamaño de página solicitado.
 
 
 def centro_wgs84(geometry):
@@ -136,7 +164,6 @@ def exportar(taxon_ids, csv_path="eidos.csv", geojson_path=None):
     filas = 0
     temporal = None
     try:
-        # Solo sustituir el CSV de destino cuando todas las consultas terminen.
         with requests.Session() as session, tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", newline="",
             dir=csv_path.parent, suffix=".csv.tmp", delete=False,

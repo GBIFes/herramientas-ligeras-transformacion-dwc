@@ -49,16 +49,19 @@ class DataExplorer:
 
         def fetch_single(ds_id):
             try:
-                # Si es el dataset sintético 1 para vistas que no manejan iddataset
-                if ds_id == 1 and not (
-                    "iddataset" in self.catalog_df.columns
-                    or "dataset_id" in self.catalog_df.columns
-                    or "id_dataset" in self.catalog_df.columns
-                ):
+                has_id_col = any(
+                    c in self.catalog_df.columns
+                    for c in ["iddataset", "dataset_id", "id_dataset"]
+                )
+                if ds_id == 1 and not has_id_col:
                     df = self.api.get_completo(view_name=self.current_view)
                 else:
-                    df = self.api.get_dataset(
-                        ds_id,
+                    id_col_name = next(
+                        (c for c in ["iddataset", "dataset_id", "id_dataset"] if c in self.catalog_df.columns),
+                        "iddataset"
+                    )
+                    df = self.api.fetch_all(
+                        filters={id_col_name: ds_id},
                         view_name=self.current_view
                     )
                 if not df.empty:
@@ -67,7 +70,6 @@ class DataExplorer:
                 print(f"Dataset {ds_id}: {ex}")
             return None
 
-        # Usar un pool de hilos (máximo 10 hilos concurrentes para optimizar la red)
         max_workers = min(10, len(dataset_ids)) if dataset_ids else 1
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -98,7 +100,6 @@ class DataExplorer:
         ds_name_col = next((c for c in ["dataset", "nombre_dataset", "titulo"] if c in self.catalog_df.columns), None)
 
         if not ds_id_col:
-            # Vista sin desglose por datasets: creamos un nodo general contenedor
             return pd.DataFrame([{
                 "iddataset": 1,
                 "dataset": f"Todos los registros de {self.current_view}",
