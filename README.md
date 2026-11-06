@@ -1,6 +1,6 @@
 # Herramientas Ligeras
 Herramientas para la preparación de archivos para el IPT GBIF.ES
-pequeños programas en Python convertidos de módulos de VBA para ejecutarse sobre archivos csv que producen como resultado un archivo tambien csv con una o varias columnas con los datos convertidos, transformados, estandarizados o con el resultado de la búsqueda específica
+ Programas en Python o módilis escritos en VBA y convertidos a Python para ejecutarse sobre archivos csv que producen como resultado un archivo tambien csv con una o varias columnas con los datos convertidos, transformados, estandarizados o con el resultado de la búsqueda específica
 
 Para obtener un ejecutable en windows ejecutar en Visual Studio Code:
 	pyinstaller --onefile --windowed "C:\[path del directorio]\[nombre del programa].py
