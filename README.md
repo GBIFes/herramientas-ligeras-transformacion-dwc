@@ -13,7 +13,7 @@ Para obtener un ejecutable en windows ejecutar en Visual Studio Code:
 
 **VisorDwCa:** Permite seleccionar un archivo DarwinCore y visualizar la metadata y los demás archivos de datos, salvarlos en excel o en Access de Microsoft.
 
-**VisorDataSetsEIDOS:** Se conecta con el sitio del MITECO donde reside la data de especies silvestres e invadiras en España y extrae la lista de datasets disponibles en el sevidor. al navegar por sus pestañas podemos ver y guardar localmente los datos de los distintos datasets para su posterior uso.
+**VisorDataSetsEIDOS:** Se conecta con el sitio del MITECO donde reside la data de especies silvestres, exóticas e invasoras en España y extrae la lista de datasets disponibles en el servidor. al navegar por sus pestañas podemos ver y guardar localmente los datos de los distintos datasets para su posterior uso.
 
 **DwCA_UUID:** Generador de UUID para Darwin Core Archive. Al elegir un DWC-a produce una copia en la que sustituyó los identificadores de las tablas por UUIDS agnósticos conservando las columnas de los identificadores previos para permitir su conexión con los registros originales de la base de datos.
 
