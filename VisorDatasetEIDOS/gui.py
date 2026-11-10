@@ -2,9 +2,8 @@
 gui.py
 ======
 
-EIDOS Multivisor - Interfaz gráfica con ventana emergente de progreso,
-selección masiva de grupos, persistencia, recarga y el botón "Exportar a DwCa" 
-con selector de directorio.
+EIDOS Multivisor - Interfaz gráfica con ventana modal de configuración para DwCa,
+incorporando selección y escritura libre de measurementType y acrónimos de numeración.
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ EIDOS_WEB = (
 
 
 class ProgressWindow:
-    """Ventana emergente modal con barra de progreso para cargas y refrescos."""
     def __init__(self, parent, title="Procesando..."):
         self.top = tk.Toplevel(parent)
         self.top.title(title)
@@ -71,6 +69,104 @@ class ProgressWindow:
             pass
 
 
+class DwCaConfigModal:
+    """Ventana emergente para configurar los parámetros de exportación Darwin Core."""
+    def __init__(self, parent):
+        self.top = tk.Toplevel(parent)
+        self.top.title("Configuración de Exportación DwCa")
+        self.top.geometry("520x340")
+        self.top.resizable(False, False)
+        self.top.transient(parent)
+        self.top.grab_set()
+
+        self.result = None
+
+        # Controles
+        ttk.Label(self.top, text="Configurar Parámetros del Paquete Darwin Core", font=("Segoe UI", 11, "bold")).pack(pady=(15, 10))
+
+        form_frame = ttk.Frame(self.top, padding=15)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 1. measurementType
+        ttk.Label(form_frame, text="measurementType:", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.mtype_combo = ttk.Combobox(form_frame, values=[
+            "Legal protection status",
+            "Legal consideration as exotic or invasive species"
+        ], width=60)
+        self.mtype_combo.pack(anchor="w", pady=(0, 10))
+        self.mtype_combo.set("Legal protection status")
+
+        # 2. Motivo / Acrónimo de Numeración
+        ttk.Label(form_frame, text="Motivo / Acrónimo para Numeración (ID):", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.acronym_combo = ttk.Combobox(form_frame, values=[
+            "LESRPE",
+            "CEEI"
+        ], width=60)
+        self.acronym_combo.pack(anchor="w", pady=(0, 15))
+        self.acronym_combo.set("LESRPE")
+
+        # Botones
+        btn_frame = ttk.Frame(self.top)
+        btn_frame.pack(pady=10)
+
+        ttk.Button(btn_frame, text="Aceptar y Exportar", command=self.on_accept).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancelar", command=self.top.destroy).pack(side=tk.LEFT, padx=5)
+
+    def on_accept(self):
+        self.result = {
+            "measurement_type": self.mtype_combo.get().strip(),
+            "dataset_acronym": self.acronym_combo.get().strip()
+        }
+        self.top.destroy()
+
+
+class RecordDetailWindow:
+    def __init__(self, parent, record_dict: dict, title="Detalle del Registro"):
+        self.top = tk.Toplevel(parent)
+        self.top.title(title)
+        self.top.geometry("750x650")
+        self.top.transient(parent)
+
+        container = ttk.Frame(self.top)
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        ttk.Label(scrollable_frame, text="Atributos y Valores del Registro", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 10))
+
+        for key, val in record_dict.items():
+            row_frame = ttk.Frame(scrollable_frame, padding=2)
+            row_frame.pack(fill=tk.X, expand=True, pady=2)
+
+            lbl_key = ttk.Label(row_frame, text=f"{key}:", font=("Segoe UI", 9, "bold"), width=28, anchor="e")
+            lbl_key.pack(side=tk.LEFT, padx=(0, 5))
+
+            val_str = "" if val is None else str(val)
+            lbl_val = ttk.Label(row_frame, text=val_str, font=("Segoe UI", 9), wraplength=450, justify="left")
+            lbl_val.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        btn_close = ttk.Button(scrollable_frame, text="Cerrar", command=self.top.destroy)
+        btn_close.pack(pady=15)
+
+
 class EidosTabManager:
     def __init__(self, notebook, title, view_name):
         self.view_name = view_name
@@ -92,11 +188,11 @@ class EidosTabManager:
         paned = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        self.panel_left = ttk.Frame(paned, width=380)
+        self.panel_left = ttk.Frame(paned, width=320)
         self.panel_right = ttk.Frame(paned)
 
         paned.add(self.panel_left, weight=1)
-        paned.add(self.panel_right, weight=4)
+        paned.add(self.panel_right, weight=5)
 
         ttk.Label(self.panel_left, text=f"Datasets ({self.view_name})").pack(anchor="w", padx=5, pady=5)
         
@@ -122,24 +218,31 @@ class EidosTabManager:
 
         self.group_nodes = [self.node_nacional, self.node_internacional, self.node_autonomico, self.node_general]
 
-        self.tree = ttk.Treeview(self.panel_right, show="headings")
-        r_vsb = ttk.Scrollbar(self.panel_right, orient="vertical", command=self.tree.yview)
-        r_hsb = ttk.Scrollbar(self.panel_right, orient="horizontal", command=self.tree.xview)
+        right_container = ttk.Frame(self.panel_right)
+        right_container.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        self.tree = ttk.Treeview(right_container, show="headings")
+        r_vsb = ttk.Scrollbar(right_container, orient="vertical", command=self.tree.yview)
+        r_hsb = ttk.Scrollbar(right_container, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscroll=r_vsb.set, xscroll=r_hsb.set)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
         r_vsb.grid(row=0, column=1, sticky="ns")
         r_hsb.grid(row=1, column=0, sticky="ew")
-        self.panel_right.rowconfigure(0, weight=1)
-        self.panel_right.columnconfigure(0, weight=1)
+        
+        right_container.rowconfigure(0, weight=1)
+        right_container.columnconfigure(0, weight=1)
 
 
 class EidosGUI:
-
     def __init__(self, root):
         self.root = root
         self.root.title("EIDOS Multivisor Avanzado")
         self.root.geometry("1700x950")
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), padding=(10, 6))
 
         self.search_var = tk.StringVar()
         self.filter_column_var = tk.StringVar(value="Todas")
@@ -170,7 +273,7 @@ class EidosGUI:
         for title, view_name in views_def:
             tab_obj = EidosTabManager(self.notebook, title, view_name)
             tab_obj.dataset_tree.bind("<Double-1>", lambda e, t=tab_obj: self.handle_tree_double_click(t))
-            tab_obj.tree.bind("<Double-1>", lambda e, t=tab_obj: self.open_selected_record(t))
+            tab_obj.tree.bind("<Double-1>", lambda e, t=tab_obj: self.open_record_detail(t))
             self.tabs[view_name] = tab_obj
 
         self.build_statusbar()
@@ -182,13 +285,12 @@ class EidosGUI:
         self.btn_refresh = ttk.Button(frame, text="Actualizar / Refresh", command=self.refresh_active_tab)
         self.btn_refresh.pack(side=tk.LEFT, padx=3)
 
-        self.btn_ficha = ttk.Button(frame, text="Abrir ficha EIDOS", command=lambda: self.open_selected_record(self.get_active_tab()))
+        self.btn_ficha = ttk.Button(frame, text="Abrir ficha EIDOS (Web)", command=lambda: self.open_selected_record_web(self.get_active_tab()))
         self.btn_ficha.pack(side=tk.LEFT, padx=3)
 
         self.btn_export = ttk.Button(frame, text="Exportar vista actual", command=self.export_current)
         self.btn_export.pack(side=tk.LEFT, padx=3)
 
-        # Botones exclusivos de la vista LESRPE (Matriz Nacional y Exportar a DwCa)
         self.btn_matrix = ttk.Button(frame, text="Matriz Nacional", command=self.build_matrix)
         self.btn_dwca_view = ttk.Button(frame, text="Exportar a DwCa", command=self.export_to_dwca)
 
@@ -205,7 +307,6 @@ class EidosGUI:
     def build_statusbar(self):
         status_frame = ttk.Frame(self.root)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=5, pady=2)
-
         ttk.Label(status_frame, textvariable=self.status_var, anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def get_active_tab(self) -> EidosTabManager:
@@ -322,24 +423,15 @@ class EidosGUI:
             frames = []
             completed = 0
 
-            def fetch_single(ds_id):
-                nonlocal completed
-                try:
-                    df = tab.explorer.load_datasets([ds_id])
-                    return df if not df.empty else None
-                except Exception:
-                    return None
-                finally:
+            max_workers = min(10, total)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = executor.map(lambda ds: tab.explorer.load_datasets([ds]), sorted(tab.selected_datasets))
+                for df in results:
                     completed += 1
                     pct = int((completed / total) * 100)
                     self.root.after(0, lambda c=completed, t=total, p=pct: progress_win.update_progress(
                         c, t, text=f"Descargando datasets... {c}/{t} completados ({p}%)"
                     ))
-
-            max_workers = min(10, total)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                results = executor.map(lambda ds: tab.explorer.load_datasets([ds]), sorted(tab.selected_datasets))
-                for df in results:
                     if df is not None and not df.empty:
                         frames.append(df)
 
@@ -441,7 +533,7 @@ class EidosGUI:
 
         for col in columns:
             tab.tree.heading(col, text=col, command=lambda c=col: self.sort_column(tab, c, False))
-            tab.tree.column(col, width=170, stretch=True)
+            tab.tree.column(col, width=200, minwidth=120, stretch=False)
 
         for _, row in tab.current_df.head(5000).iterrows():
             tab.tree.insert("", tk.END, values=list(row))
@@ -476,14 +568,19 @@ class EidosGUI:
         threading.Thread(target=task, daemon=True).start()
 
     def export_to_dwca(self):
-        """
-        Permite seleccionar un directorio de destino y exporta los datos activos 
-        al paquete Darwin Core mediante DwCaBridge.
-        """
         tab = self.get_active_tab()
         if tab.current_df is None or tab.current_df.empty:
             messagebox.showwarning("Aviso", "No hay datos cargados en esta vista para exportar a DwCa.")
             return
+
+        # 1. Abrir ventana de configuración modal
+        config_modal = DwCaConfigModal(self.root)
+        self.root.wait_window(config_modal.top)
+
+        if not config_modal.result:
+            return  # Cancelado por el usuario
+
+        config = config_modal.result
 
         directory = filedialog.askdirectory(title="Seleccione directorio para guardar el paquete DwCa")
         if not directory:
@@ -496,7 +593,12 @@ class EidosGUI:
             
             try:
                 bridge = DwCaBridge(directory)
-                zip_path = bridge.export_dwca_package(tab.current_df, f"eidos_{tab.view_name}")
+                zip_path = bridge.export_dwca_package(
+                    tab.current_df, 
+                    f"eidos_{tab.view_name}",
+                    measurement_type=config["measurement_type"],
+                    dataset_acronym=config["dataset_acronym"]
+                )
                 
                 self.root.after(0, lambda: progress_win.close())
                 self.root.after(0, lambda: messagebox.showinfo(
@@ -505,12 +607,25 @@ class EidosGUI:
                 ))
                 self.root.after(0, lambda: self.status_var.set(f"Paquete DwCa guardado en: {zip_path.parent}"))
             except Exception as ex:
+                err_msg = str(ex)
                 self.root.after(0, lambda: progress_win.close())
-                self.root.after(0, lambda: messagebox.showerror("Error", f"Error al generar el paquete DwCa: {ex}"))
+                self.root.after(0, lambda err=err_msg: messagebox.showerror("Error", f"Error al generar el paquete DwCa:\n{err}"))
 
         threading.Thread(target=task, daemon=True).start()
 
-    def open_selected_record(self, tab: EidosTabManager):
+    def open_record_detail(self, tab: EidosTabManager):
+        if tab.current_df is None:
+            return
+        selected = tab.tree.focus()
+        if not selected:
+            return
+        values = tab.tree.item(selected, "values")
+        columns = list(tab.current_df.columns)
+        
+        record_dict = {columns[i]: values[i] for i in range(min(len(columns), len(values)))}
+        RecordDetailWindow(self.root, record_dict, title=f"Detalle de Registro - {tab.view_name}")
+
+    def open_selected_record_web(self, tab: EidosTabManager):
         if tab.current_df is None:
             return
         selected = tab.tree.focus()
