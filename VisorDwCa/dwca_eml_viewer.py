@@ -15,11 +15,8 @@ class EMLViewer(tk.Toplevel):
         self.title("Metadata EML")
         self.geometry("1200x800")
 
-        # Editor integrado como Frame
         self.editor = XMLTreeEditor(self)
         self.editor.pack(fill="both", expand=True)
-
-        # Abrir automáticamente el EML
         self.editor.open_xml(eml_path)
 
 
@@ -85,6 +82,7 @@ class XMLTreeEditor(tk.Frame):
         }
         for level, color in colors.items():
             style.configure(level, background=color)
+
     # -------------------------------
     # LAYOUT
     # -------------------------------
@@ -117,7 +115,6 @@ class XMLTreeEditor(tk.Frame):
 
         self.treeview.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        # Botones mover nodo
         btn_frame = tk.Frame(left)
         btn_frame.pack(fill="x")
         tk.Button(btn_frame, text="Subir nodo", command=self.move_node_up).pack(side="left", padx=2, pady=2)
@@ -178,6 +175,7 @@ class XMLTreeEditor(tk.Frame):
         tk.Button(btns, text="Aplicar cambios", command=self.apply_changes).pack(side="left", padx=2)
         tk.Button(btns, text="Añadir hijo...", command=self.add_child_dialog).pack(side="left", padx=2)
         tk.Button(btns, text="Eliminar nodo", command=self.delete_node).pack(side="left", padx=2)
+
     # -------------------------------
     # ABRIR XML
     # -------------------------------
@@ -193,9 +191,7 @@ class XMLTreeEditor(tk.Frame):
             return
         self.root_xml = self.tree_xml.getroot()
         self.current_path = path
-        self.treeview.delete(*self.treeview.get_children())
-        self.node_map.clear()
-        self.build_tree(self.root_xml, "", 0)
+        self._rebuild_tree()
 
     # -------------------------------
     # GUARDAR XML
@@ -227,6 +223,18 @@ class XMLTreeEditor(tk.Frame):
     # -------------------------------
     # ÁRBOL XML
     # -------------------------------
+    def _rebuild_tree(self):
+        """Reconstruye el árbol conservando la selección del nodo actual."""
+        self.treeview.delete(*self.treeview.get_children())
+        self.node_map.clear()
+        self.build_tree(self.root_xml, "", 0)
+        if self.current_node is not None:
+            for node_id, e in self.node_map.items():
+                if e is self.current_node:
+                    self.treeview.selection_set(node_id)
+                    self.treeview.see(node_id)
+                    break
+
     def build_tree(self, elem, parent_id, depth):
         tag = f"level{min(depth, 5)}"
         node_id = self.treeview.insert(parent_id, "end", text=elem.tag, tags=(tag,))
@@ -292,9 +300,7 @@ class XMLTreeEditor(tk.Frame):
                 new_attrs[k.strip()] = v.strip()
         self.current_node.attrib.clear()
         self.current_node.attrib.update(new_attrs)
-        self.treeview.delete(*self.treeview.get_children())
-        self.node_map.clear()
-        self.build_tree(self.root_xml, "", 0)
+        self._rebuild_tree()
 
     # -------------------------------
     # AÑADIR / ELIMINAR NODOS
@@ -314,9 +320,7 @@ class XMLTreeEditor(tk.Frame):
                 return
             new = ET.SubElement(self.current_node, tag)
             new.text = ""
-            self.treeview.delete(*self.treeview.get_children())
-            self.node_map.clear()
-            self.build_tree(self.root_xml, "", 0)
+            self._rebuild_tree()
             win.destroy()
 
         tk.Button(win, text="Añadir", command=do_add).pack(pady=5)
@@ -330,9 +334,7 @@ class XMLTreeEditor(tk.Frame):
         if messagebox.askyesno("Confirmar", "¿Eliminar este nodo y todos sus hijos?"):
             parent.remove(self.current_node)
             self.current_node = None
-            self.treeview.delete(*self.treeview.get_children())
-            self.node_map.clear()
-            self.build_tree(self.root_xml, "", 0)
+            self._rebuild_tree()
 
     def find_parent(self, root, target):
         for child in list(root):
@@ -342,50 +344,37 @@ class XMLTreeEditor(tk.Frame):
             if res is not None:
                 return res
         return None
+
     # -------------------------------
     # MOVER NODOS
     # -------------------------------
     def move_node_up(self):
         if not self.current_node:
             return
-
         parent = self.find_parent(self.root_xml, self.current_node)
         if parent is None:
             return
-
         children = list(parent)
         idx = children.index(self.current_node)
-
         if idx == 0:
-            return  # ya está arriba
-
+            return
         children[idx], children[idx - 1] = children[idx - 1], children[idx]
         parent[:] = children
-
-        self.treeview.delete(*self.treeview.get_children())
-        self.node_map.clear()
-        self.build_tree(self.root_xml, "", 0)
+        self._rebuild_tree()
 
     def move_node_down(self):
         if not self.current_node:
             return
-
         parent = self.find_parent(self.root_xml, self.current_node)
         if parent is None:
             return
-
         children = list(parent)
         idx = children.index(self.current_node)
-
         if idx == len(children) - 1:
-            return  # ya está abajo
-
+            return
         children[idx], children[idx + 1] = children[idx + 1], children[idx]
         parent[:] = children
-
-        self.treeview.delete(*self.treeview.get_children())
-        self.node_map.clear()
-        self.build_tree(self.root_xml, "", 0)
+        self._rebuild_tree()
 
     # -------------------------------
     # BÚSQUEDA SIMPLE
@@ -479,3 +468,40 @@ class XMLTreeEditor(tk.Frame):
             idx = self.results_list.curselection()
             if not idx:
                 return
+            elem = self.search_results[idx[0]]
+            for node_id, e in self.node_map.items():
+                if e is elem:
+                    self.treeview.selection_set(node_id)
+                    self.treeview.see(node_id)
+                    self.on_tree_select(None)
+                    break
+
+        self.results_list.bind("<<ListboxSelect>>", select_from_results)
+
+        def do_find():
+            term = entry_find.get().strip()
+            if not term:
+                return
+            self.search_results = []
+            self._search_recursive(self.root_xml, term, self.search_results)
+            update_results_list()
+            if not self.search_results:
+                messagebox.showinfo("Sin resultados", "No se encontraron coincidencias.", parent=win)
+
+        def do_replace_all():
+            term = entry_find.get().strip()
+            replacement = entry_replace.get()
+            if not term:
+                return
+            count = 0
+            for elem in self.root_xml.iter():
+                if elem.text and term.lower() in elem.text.lower():
+                    elem.text = elem.text.replace(term, replacement)
+                    count += 1
+            self._rebuild_tree()
+            self.search_results = []
+            update_results_list()
+            messagebox.showinfo("Reemplazar", f"Se reemplazó el texto en {count} nodo(s).", parent=win)
+
+        tk.Button(frame_buttons, text="Buscar", command=do_find).pack(side="left", padx=5)
+        tk.Button(frame_buttons, text="Reemplazar todo", command=do_replace_all).pack(side="left", padx=5)

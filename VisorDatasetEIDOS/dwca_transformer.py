@@ -3,10 +3,10 @@ dwca_transformer.py
 ===================
 Transformador especializado en el Proceso LESRPE (MITECO).
 Particiona y genera el estándar Darwin Core completo con:
-- taxon.csv (con taxonKey usando www.gbif.org/species, con timeout protegido y progreso detallado)
-- measurementOfFacts.csv (Filtrado estricto idvigente == 1, columnas binarias 
-  Peninsula, Canarias y Baleares [1/0], con soporte para estados legales personalizados)
-- vernacularName.csv (Scraping web multihilo con redundancia, reintentos y control de hilos)
+- Captura robusta y flexible de `dataset_acronym` para los prefijos de IDs.
+- Uso dinámico de `measurement_type` seleccionado en la UI.
+- Filtrado estricto de registros nulos y a nivel genérico (scientificName con espacios).
+- Sincronización de parámetros de identificación en Core y Extensiones.
 """
 
 from __future__ import annotations
@@ -232,18 +232,61 @@ class DwCaTransformer:
                     logger.error(f"Fallo definitivo al scrapear {taxon_id_url} tras {max_retries} intentos.")
         return []
 
-    def transform_and_export(self, df: pd.DataFrame, base_name: str = "lesrpe_dwca", progress_callback=None, **kwargs) -> Path:
+    def transform_and_export(
+        self, 
+        df: pd.DataFrame, 
+        base_name: str = "lesrpe_dwca", 
+        progress_callback=None, 
+        mof_prefix: str | None = None, 
+        vn_prefix: str | None = None, 
+        measurement_type: str | None = None,
+        dataset_acronym: str | None = None,
+        **kwargs
+    ) -> Path:
         """
-        Ejecuta el proceso completo LESRPE con control de hilos seguro, trazas de diagnóstico y reporte de progreso fluído.
+        Ejecuta el proceso completo LESRPE aplicando filtros estrictos, sincronización y 
+        capturando explícitamente los parámetros de la UI (`dataset_acronym`, `measurement_type`, etc.).
         """
         if df.empty:
             raise ValueError("El DataFrame suministrado está vacío.")
+
+        # Resolución robusta del acrónimo / prefijo desde cualquier variante enviada por la UI
+        resolved_mof_prefix = (
+            dataset_acronym or
+            mof_prefix or 
+            kwargs.get("dataset_acronym") or
+            kwargs.get("mof_prefix") or 
+            kwargs.get("prefix_mof") or 
+            kwargs.get("measurement_prefix") or 
+            kwargs.get("mof_id_prefix") or 
+            kwargs.get("prefix") or 
+            "LESRPE"
+        ).strip()
+        
+        resolved_vn_prefix = (
+            dataset_acronym or
+            vn_prefix or 
+            kwargs.get("dataset_acronym") or
+            kwargs.get("vn_prefix") or 
+            kwargs.get("prefix_vn") or 
+            kwargs.get("vernacular_prefix") or 
+            kwargs.get("vn_id_prefix") or 
+            kwargs.get("prefix") or 
+            "LESRPE"
+        ).strip()
+
+        resolved_measurement_type = (
+            measurement_type or
+            kwargs.get("measurement_type") or
+            "Legal protection status"
+        ).strip()
+
+        manual_estado_legal = kwargs.get("estado_legal") or kwargs.get("manual_estado_legal") or kwargs.get("estadoLegal")
 
         def safe_progress(pct, msg):
             logger.info(f"[PROGRESO {pct}%] {msg}")
             if progress_callback:
                 try:
-                    # Soporta callbacks que acepten (pct, msg) o solo (pct)
                     try:
                         progress_callback(pct, msg)
                     except TypeError:
@@ -251,10 +294,14 @@ class DwCaTransformer:
                 except Exception as ex:
                     logger.error(f"Error en progress_callback: {ex}")
 
-        safe_progress(5, "Iniciando validación y filtrado de datos de entrada...")
+        safe_progress(5, "Iniciando validación, filtrado y sincronización de parámetros...")
 
         df_work = df.copy()
 
+        if manual_estado_legal:
+            df_work["estadolegal"] = manual_estado_legal
+
+        # 1. Filtrado estricto para descartar registros con campos taxonómicos nulos o vacíos
         name_check_cols = ['idnombre_aceptado', 'nombre_aceptado', 'idnombre_dat', 'nombre_en_dataset']
         existing_cols_to_check = [c for c in name_check_cols if c in df_work.columns]
         
@@ -267,6 +314,22 @@ class DwCaTransformer:
         if df_work.empty:
             raise ValueError("No quedan registros tras aplicar el filtro de exclusión de nombres/identificadores vacíos.")
 
+        # 2. FILTRO ESTRUCTURAL: Descartar registros a nivel genérico (scientificName sin espacios)
+        sci_col_candidates = ['nombre_aceptado', 'scientificName', 'nombre']
+        sci_target_col = next((c for c in sci_col_candidates if c in df_work.columns), None)
+        
+        if sci_target_col:
+            def tiene_especie(val):
+                if not val or not isinstance(val, str):
+                    return False
+                return " " in val.strip()
+
+            mask_especie = df_work[sci_target_col].apply(tiene_especie)
+            df_work = df_work[mask_especie].copy()
+
+        if df_work.empty:
+            raise ValueError("No quedan registros tras filtrar los taxones a nivel genérico (se requiere especie con epíteto).")
+
         if "idtaxon" not in df_work.columns and "id_taxon" in df_work.columns:
             df_work["idtaxon"] = df_work["id_taxon"]
 
@@ -274,7 +337,7 @@ class DwCaTransformer:
         grouped = df_work.groupby(group_col).first().reset_index()
 
         # ==========================================
-        # 1. CONSTRUCCIÓN DE TAXON.CSV (CON PROGRESO ACTIVO)
+        # 1. CONSTRUCCIÓN DE TAXON.CSV (CORE)
         # ==========================================
         total_taxa_taxon = len(grouped)
         safe_progress(20, f"Construyendo metadatos taxonómicos (0/{total_taxa_taxon}) [taxon.csv]...")
@@ -359,11 +422,15 @@ class DwCaTransformer:
         taxon_df = pd.DataFrame(taxon_records)
 
         # ==========================================
-        # 2. CONSTRUCCIÓN DE MEASUREMENTOFFACTS.CSV
+        # 2. CONSTRUCCIÓN DE MEASUREMENTOFFACTS.CSV (EXTENSIÓN 1)
         # ==========================================
-        safe_progress(40, "Generando estados legales y distribución territorial (measurementOfFacts.csv)...")
+        safe_progress(40, "Generando estados legales y distribución territorial sincronizados (measurementOfFacts.csv)...")
         
-        df_vigentes = df_work[df_work["idvigente"].astype(str).isin(["1", "1.0"])].copy()
+        valid_taxon_ids = set(taxon_id_map.keys())
+        df_vigentes = df_work[
+            df_work["idvigente"].astype(str).isin(["1", "1.0"]) & 
+            df_work[group_col].isin(valid_taxon_ids)
+        ].copy()
 
         subset_dedup = [group_col, 'estadolegal', 'norma', 'observacionespoblacion']
         existing_subcols = [c for c in subset_dedup if c in df_vigentes.columns]
@@ -410,9 +477,9 @@ class DwCaTransformer:
                 meas_date = self.parse_norm_date(norma)
 
             fact_records.append({
-                "measurementID": f"LESRPEeMoF-{id_t}-{n_mof}",
+                "measurementID": f"{resolved_mof_prefix}-{id_t}-{n_mof}",
                 "taxonID": t_id,
-                "measurementType": "Legal Protection Status",
+                "measurementType": resolved_measurement_type,
                 "measurementValue": meas_value,
                 "measurementMethod": norma,
                 "measurementDeterminedDate": meas_date,
@@ -428,7 +495,7 @@ class DwCaTransformer:
         measurements_df = pd.DataFrame(fact_records)
 
         # ==========================================
-        # 3. SCRAPING MULTIHILO SEGURO CON LOGS
+        # 3. SCRAPING MULTIHILO SINCRONIZADO (VERNACULARNAME.CSV)
         # ==========================================
         vernacular_records = []
         n_vn = 1
@@ -436,7 +503,7 @@ class DwCaTransformer:
         completed_count = 0
         progress_lock = threading.Lock()
 
-        safe_progress(50, f"Iniciando scraping web multihilo para {total_taxa} taxones (redundancia activa)...")
+        safe_progress(50, f"Iniciando scraping web multihilo sincronizado para {total_taxa} taxones...")
 
         def fetch_task(id_t, t_id):
             names = self.scrape_with_redundancy(t_id, max_retries=3)
@@ -476,7 +543,7 @@ class DwCaTransformer:
                             n_vn += 1
 
                         vernacular_records.append({
-                            "vernacularNameID": f"LESRPEVn-{id_t}-{non_local_vn_id}",
+                            "vernacularNameID": f"{resolved_vn_prefix}-{id_t}-{non_local_vn_id}",
                             "taxonId": t_id,
                             "vernacularName": nombre,
                             "language": lang_code,

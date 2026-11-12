@@ -2,20 +2,28 @@
 dwca_viewer.py
 ==============
 Módulo principal del visor de Darwin Core Archive con paneles adaptativos,
-wrap inteligente y barras de desplazamiento vertical y horizontal.
+campos editables y copiables, borrado de registros con integridad referencial,
+guardado del DwC-A modificado y barras de desplazamiento vertical y horizontal.
 """
 
 import os
+import csv
+import xml.etree.ElementTree as ET
+import shutil
+import tempfile
+import zipfile
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, filedialog, messagebox
 import webbrowser
-from dwca_loader import DwcaLoader
+from dwca_loader import DwcaLoader, detect_delimiter, safe_open, strip_ns
 from dwca_model import DwcaModel
 from dwca_access import export_dwca_to_access
 from dwca_excel import export_dwca_to_excel
 
+
 def is_url(text):
     return isinstance(text, str) and (text.startswith("http://") or text.startswith("https://"))
+
 
 class ViewerFrame(tk.Frame):
     def __init__(self, root):
@@ -31,6 +39,9 @@ class ViewerFrame(tk.Frame):
         self.active_index = 0
         self.welcome_frame = None
         self.core_path = ""
+        self.loader_base = ""
+        self.core_filename = ""
+        self.ext_filenames = {}
 
         # -------------------------------
         # BARRA SUPERIOR
@@ -58,6 +69,18 @@ class ViewerFrame(tk.Frame):
         )
         self.btn_close.pack(side="right", padx=10, pady=5)
 
+        self.btn_save = tk.Button(
+            self.top_bar,
+            text="💾 Guardar DwC-A",
+            font=("Segoe UI", 10, "bold"),
+            bg="#b8860b",
+            fg="white",
+            relief="flat",
+            command=self.save_dwca,
+            state="disabled"
+        )
+        self.btn_save.pack(side="right", padx=5, pady=5)
+
         self.btn_access = tk.Button(
             self.top_bar,
             text="Exportar a Access",
@@ -81,16 +104,33 @@ class ViewerFrame(tk.Frame):
         self.btn_excel.pack(side="right", padx=5, pady=5)
 
         # -------------------------------
-        # PANEL PRINCIPAL (PanedWindow)
+        # PANEL PRINCIPAL (PanedWindow con sash ancho)
         # -------------------------------
-        main = tk.PanedWindow(self, orient="horizontal")
+        main = tk.PanedWindow(self, orient="horizontal", sashwidth=10, sashpad=2,
+                              sashrelief="raised", bd=1)
         main.pack(fill="both", expand=True)
+        self.main_paned = main
 
         # -------------------------------
         # PANEL IZQUIERDO (CORE) CON SCROLL DUAL
         # -------------------------------
         self.left_container = tk.Frame(main)
-        main.add(self.left_container)
+        main.add(self.left_container, width=600, minsize=300)
+
+        core_actions = tk.Frame(self.left_container, bg="#f5f5f5")
+        core_actions.pack(fill="x")
+
+        self.btn_del_core = tk.Button(
+            core_actions,
+            text="🗑",
+            font=("Segoe UI", 11),
+            bg="#d9534f",
+            fg="white",
+            relief="flat",
+            width=3,
+            command=self.delete_core_record
+        )
+        self.btn_del_core.pack(side="left", padx=5, pady=4)
 
         self.left_canvas = tk.Canvas(self.left_container, highlightthickness=0)
         self.left_scroll_y = tk.Scrollbar(self.left_container, orient="vertical", command=self.left_canvas.yview)
@@ -117,7 +157,7 @@ class ViewerFrame(tk.Frame):
         # PANEL DERECHO (EXTENSIONES)
         # -------------------------------
         self.right = tk.Frame(main)
-        main.add(self.right)
+        main.add(self.right, width=600, minsize=300)
 
         self.tabs = ttk.Notebook(self.right)
         self.tabs.pack(fill="both", expand=True)
@@ -166,6 +206,15 @@ class ViewerFrame(tk.Frame):
         tk.Button(filter_frame, text="Filtrar", command=self.apply_filter_inline).pack(side="left", padx=5)
         tk.Button(filter_frame, text="Mostrar todos", command=self.clear_filter).pack(side="left", padx=5)
 
+        # -------------------------------
+        # SCROLL CON LA RUEDA DEL RATÓN
+        # -------------------------------
+        self.left_canvas.bind("<Enter>", lambda e: self.left_canvas.bind_all("<MouseWheel>", self._on_mousewheel))
+        self.left_canvas.bind("<Leave>", lambda e: self.left_canvas.unbind_all("<MouseWheel>"))
+
+    def _on_mousewheel(self, event):
+        self.left_canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
     def set_welcome(self, welcome_frame):
         self.welcome_frame = welcome_frame
 
@@ -178,7 +227,7 @@ class ViewerFrame(tk.Frame):
         if self.model is None:
             messagebox.showwarning("Exportar a Access", "Primero abre un DwC-A.")
             return
-        eml_path = os.path.join(os.path.dirname(self.core_path), "eml.xml")
+        eml_path = os.path.join(self.loader_base, "eml.xml")
         export_dwca_to_access(self.root, self.core_fields, self.core_rows,
                               self.extensions, self.ext_data, eml_path)
 
@@ -186,7 +235,7 @@ class ViewerFrame(tk.Frame):
         if self.model is None:
             messagebox.showwarning("Exportar a Excel", "Primero abre un DwC-A.")
             return
-        eml_path = os.path.join(os.path.dirname(self.core_path), "eml.xml")
+        eml_path = os.path.join(self.loader_base, "eml.xml")
         export_dwca_to_excel(self.root, self.core_fields, self.core_rows,
                              self.extensions, self.ext_data, eml_path)
 
@@ -209,20 +258,223 @@ class ViewerFrame(tk.Frame):
         self.filtered_indices = None
         self.active_index = 0
 
+        self.loader_base = loader.base or ""
+        self.core_filename = ""
+        self.ext_filenames = {}
+        meta_path_real = os.path.join(self.loader_base, "meta.xml")
+        if os.path.exists(meta_path_real):
+            try:
+                self._read_filenames_from_meta(meta_path_real)
+            except Exception:
+                self.core_filename = ""
+                self.ext_filenames = {}
+
         self.filter_field_cb["values"] = self.core_fields
+        self.btn_save.config(state="normal")
 
         self.load_record()
         self.load_ext_tabs()
         self.update_right_window()
 
+    def _read_filenames_from_meta(self, meta_path):
+        root = ET.parse(meta_path).getroot()
+        for child in root.iter():
+            if strip_ns(child.tag) == "core":
+                loc = [n for n in child.iter() if strip_ns(n.tag) == "location"]
+                if loc:
+                    self.core_filename = os.path.basename(loc[-1].text.strip())
+            elif strip_ns(child.tag) == "extension":
+                loc = [n for n in child.iter() if strip_ns(n.tag) == "location"]
+                if loc:
+                    fname = os.path.basename(loc[-1].text.strip())
+                    self.ext_filenames[fname] = fname
+
+    # ---------------------------------------------------------------
+    # GUARDAR DwC-A
+    # ---------------------------------------------------------------
+    def _read_original_header(self, fpath):
+        if not os.path.exists(fpath):
+            return None
+        try:
+            with safe_open(fpath) as f:
+                return f.readline().rstrip("\r\n")
+        except Exception:
+            return None
+
+    def _write_table(self, fpath, header_line, rows):
+        delim = detect_delimiter(fpath) if os.path.exists(fpath) else "\t"
+        with open(fpath, "w", encoding="utf-8", newline="") as f:
+            if header_line:
+                f.write(header_line + "\n")
+            w = csv.writer(f, delimiter=delim, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+            w.writerows(rows)
+
+    def save_dwca(self):
+        if self.model is None:
+            messagebox.showwarning("Guardar DwC-A", "Primero abre un DwC-A.")
+            return
+        if not self.loader_base or not os.path.isdir(self.loader_base):
+            messagebox.showerror(
+                "Guardar DwC-A",
+                "No se ha localizado el directorio con los datos extraídos.\n"
+                "Vuelve a abrir el DwC-A e inténtalo de nuevo."
+            )
+            return
+
+        default_name = os.path.basename(self.core_path) if self.core_path.lower().endswith(".zip") \
+            else os.path.basename(self.core_path) + ".zip"
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Guardar DwC-A (ZIP)",
+            defaultextension=".zip",
+            initialfile=default_name,
+            filetypes=[("DwC-A ZIP", "*.zip")],
+            confirmoverwrite=True,
+        )
+        if not path:
+            return
+
+        if os.path.exists(path):
+            if not messagebox.askyesno(
+                "Guardar DwC-A",
+                f"El archivo ya existe:\n{os.path.basename(path)}\n\n¿Sobrescribirlo?"
+            ):
+                return
+
+        try:
+            if self.core_filename:
+                core_fpath = os.path.join(self.loader_base, self.core_filename)
+                header = self._read_original_header(core_fpath)
+                self._write_table(core_fpath, header, self.core_rows)
+
+            for tab_name, _fields in self.extensions:
+                fname = self.ext_filenames.get(tab_name, tab_name)
+                fpath = os.path.join(self.loader_base, fname)
+                if not os.path.exists(fpath):
+                    continue
+                header = self._read_original_header(fpath)
+                rows = [r for lst in self.ext_data.get(tab_name, {}).values() for r in lst]
+                self._write_table(fpath, header, rows)
+
+            tmp_zip = tempfile.mktemp(suffix=".zip")
+            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as z:
+                for root_dir, _dirs, files in os.walk(self.loader_base):
+                    for fname in files:
+                        full = os.path.join(root_dir, fname)
+                        arcname = os.path.relpath(full, self.loader_base)
+                        z.write(full, arcname)
+
+            shutil.move(tmp_zip, path)
+
+        except PermissionError:
+            messagebox.showerror(
+                "Guardar DwC-A",
+                "No se pudo guardar el archivo. ¿Está abierto en otro programa? Ciérralo e inténtalo de nuevo."
+            )
+            return
+        except Exception as e:
+            messagebox.showerror("Guardar DwC-A", f"Error al guardar:\n{e}")
+            return
+
+        messagebox.showinfo("Guardar DwC-A", f"DwC-A guardado correctamente en:\n{path}")
+
+    # ---------------------------------------------------------------
+    # UTILIDADES DE ÍNDICES
+    # ---------------------------------------------------------------
+    def _current_indices(self):
+        return list(range(len(self.core_rows))) if self.filtered_indices is None else list(self.filtered_indices)
+
+    def _current_core_id(self):
+        indices = self._current_indices()
+        if not indices or self.active_index >= len(indices):
+            return None
+        row = self.core_rows[indices[self.active_index]]
+        if hasattr(self.model, 'core_id_index') and self.model.core_id_index < len(row):
+            return str(row[self.model.core_id_index]).strip()
+        if "id" in self.core_fields:
+            return str(row[self.core_fields.index("id")]).strip()
+        return str(row[0]).strip()
+
+    # ---------------------------------------------------------------
+    # EDICIÓN INLINE
+    # ---------------------------------------------------------------
+    def _commit_core_edit(self, event, idx, col_index, widget):
+        new_val = widget.get()
+        row = self.core_rows[idx]
+        if col_index >= len(row):
+            row += [""] * (col_index - len(row) + 1)
+        row[col_index] = new_val
+
+    def _commit_ext_edit(self, event, ext_name, cid, row_ref, col_index, widget):
+        new_val = widget.get()
+        if col_index >= len(row_ref):
+            row_ref += [""] * (col_index - len(row_ref) + 1)
+        row_ref[col_index] = new_val
+        rows = self.ext_data.get(ext_name, {}).get(cid, [])
+        if row_ref not in rows:
+            rows.append(row_ref)
+
+    # ---------------------------------------------------------------
+    # BORRADO CON INTEGRIDAD REFERENCIAL
+    # ---------------------------------------------------------------
+    def delete_core_record(self):
+        """Borra el registro core activo y todas sus filas dependientes."""
+        indices = self._current_indices()
+        if not indices or self.active_index >= len(indices):
+            return
+
+        idx = indices[self.active_index]
+        cid = self._current_core_id()
+
+        n_dep = sum(len(self.ext_data.get(name, {}).get(cid, [])) for name, _ in self.extensions)
+        msg = f"¿Eliminar el registro core nº {self.active_index + 1}?"
+        if n_dep:
+            msg += f"\nTambién se eliminarán {n_dep} registro(s) dependiente(s) de las extensiones."
+        if not messagebox.askyesno("Eliminar registro", msg):
+            return
+
+        for name, _ in self.extensions:
+            self.ext_data.get(name, {}).pop(cid, None)
+
+        del self.core_rows[idx]
+
+        if self.filtered_indices is not None:
+            self.filtered_indices = [i for i in self.filtered_indices if i != idx]
+            self.filtered_indices = [i - 1 if i > idx else i for i in self.filtered_indices]
+
+        if self.active_index >= len(self._current_indices()):
+            self.active_index = max(0, len(self._current_indices()) - 1)
+
+        self.load_record()
+        self.update_right_window()
+
+    def delete_ext_row(self, ext_name, cid, row_ref):
+        """Borra una fila concreta de una extensión para el registro core actual."""
+        rows = self.ext_data.get(ext_name, {}).get(cid, [])
+        if row_ref not in rows:
+            return
+        if not messagebox.askyesno("Eliminar registro", f"¿Eliminar esta fila de '{ext_name}'?"):
+            return
+        rows.remove(row_ref)
+        if not rows:
+            self.ext_data[ext_name].pop(cid, None)
+        self.update_right_window()
+
+    # ---------------------------------------------------------------
+    # RENDERIZADO
+    # ---------------------------------------------------------------
     def load_record(self):
         for w in self.left_record_frame.winfo_children():
             w.destroy()
 
-        indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
+        indices = self._current_indices()
         if not indices:
             self.nav_label.config(text="0 / 0")
             return
+
+        if self.active_index >= len(indices):
+            self.active_index = 0
 
         idx = indices[self.active_index]
         row = self.core_rows[idx]
@@ -230,38 +482,32 @@ class ViewerFrame(tk.Frame):
         for i, field in enumerate(self.core_fields):
             val = row[i] if i < len(row) else ""
 
-            lbl_field = tk.Label(
-                self.left_record_frame,
-                text=field + ":",
-                font=("Segoe UI", 9, "bold"),
-                anchor="nw"
-            )
-            lbl_field.grid(row=i, column=0, sticky="nw", padx=6, pady=3)
-
+            # El título del campo es clicable si el valor es una URL
             if is_url(val):
-                btn = tk.Button(
+                lbl_field = tk.Label(
                     self.left_record_frame,
-                    text=val,
+                    text=field + ":",
+                    font=("Segoe UI", 9, "bold", "underline"),
                     fg="blue",
                     cursor="hand2",
-                    relief="flat",
-                    font=("Segoe UI", 9),
-                    wraplength=450,
-                    justify="left",
-                    command=lambda v=val: webbrowser.open(v)
+                    anchor="nw"
                 )
-                btn.grid(row=i, column=1, sticky="nw", padx=6, pady=3)
+                lbl_field.grid(row=i, column=0, sticky="nw", padx=6, pady=3)
+                lbl_field.bind("<Button-1>", lambda e, v=val: webbrowser.open(v))
             else:
-                # Wrap inteligente configurado con wraplength fijo
-                lbl_val = tk.Label(
+                lbl_field = tk.Label(
                     self.left_record_frame,
-                    text=val,
-                    font=("Segoe UI", 9),
-                    anchor="nw",
-                    wraplength=450,
-                    justify="left"
+                    text=field + ":",
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="nw"
                 )
-                lbl_val.grid(row=i, column=1, sticky="nw", padx=6, pady=3)
+                lbl_field.grid(row=i, column=0, sticky="nw", padx=6, pady=3)
+
+            entry = tk.Entry(self.left_record_frame, font=("Segoe UI", 9), width=70)
+            entry.insert(0, val)
+            entry.grid(row=i, column=1, sticky="nw", padx=6, pady=3)
+            entry.bind("<Return>", lambda e, ix=idx, ci=i, w=entry: self._commit_core_edit(e, ix, ci, w))
+            entry.bind("<FocusOut>", lambda e, ix=idx, ci=i, w=entry: self._commit_core_edit(e, ix, ci, w))
 
         self.left_record_frame.update_idletasks()
         self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
@@ -275,7 +521,6 @@ class ViewerFrame(tk.Frame):
             frame = tk.Frame(self.tabs)
             self.tabs.add(frame, text=name)
 
-            # Contenedor con scroll vertical y horizontal para cada pestaña de extensión
             canvas = tk.Canvas(frame, highlightthickness=0)
             scroll_y = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
             scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
@@ -297,22 +542,23 @@ class ViewerFrame(tk.Frame):
                 lambda e, c=canvas: c.configure(scrollregion=c.bbox("all"))
             )
 
+            canvas.bind("<Enter>", lambda e, c=canvas: c.bind_all(
+                "<MouseWheel>", lambda ev, cv=c: cv.yview_scroll(-1 * (ev.delta // 120), "units")))
+            canvas.bind("<Leave>", lambda e, c=canvas: c.unbind_all("<MouseWheel>"))
+
             frame.ext_frame = ext_frame
 
     def update_right_window(self, event=None):
-        indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
+        indices = self._current_indices()
         if not indices:
             return
 
-        idx = indices[self.active_index]
-        row = self.core_rows[idx]
+        if self.active_index >= len(indices):
+            self.active_index = 0
 
-        if hasattr(self.model, 'core_id_index') and self.model.core_id_index < len(row):
-            cid = str(row[self.model.core_id_index]).strip()
-        elif "id" in self.core_fields:
-            cid = str(row[self.core_fields.index("id")]).strip()
-        else:
-            cid = str(row[0]).strip()
+        cid = self._current_core_id()
+        if cid is None:
+            return
 
         for i, (name, fields) in enumerate(self.extensions):
             if i >= len(self.tabs.tabs()):
@@ -338,11 +584,19 @@ class ViewerFrame(tk.Frame):
 
             r_index = 0
             for r in rows:
-                if r_index > 0:
-                    ttk.Separator(ext_frame, orient="horizontal").grid(
-                        row=r_index, column=0, columnspan=2, sticky="ew", pady=6
-                    )
-                    r_index += 1
+                # Botón de papelera para borrar esta fila concreta
+                btn_del = tk.Button(
+                    ext_frame,
+                    text="🗑",
+                    font=("Segoe UI", 10),
+                    bg="#d9534f",
+                    fg="white",
+                    relief="flat",
+                    width=2,
+                    command=lambda en=name, c=cid, rr=r: self.delete_ext_row(en, c, rr)
+                )
+                btn_del.grid(row=r_index, column=0, sticky="nw", padx=6, pady=(6, 2))
+                r_index += 1
 
                 for j, field in enumerate(fields):
                     val = r[j] if j < len(r) else ""
@@ -355,21 +609,28 @@ class ViewerFrame(tk.Frame):
                     )
                     lbl_field.grid(row=r_index, column=0, sticky="nw", padx=6, pady=2)
 
-                    # Wrap inteligente aplicado a los campos de los brazos de la estrella
-                    lbl_val = tk.Label(
-                        ext_frame,
-                        text=str(val),
-                        font=("Segoe UI", 9),
-                        anchor="nw",
-                        wraplength=450,
-                        justify="left"
+                    entry = tk.Entry(ext_frame, font=("Segoe UI", 9), width=70)
+                    entry.insert(0, str(val))
+                    entry.grid(row=r_index, column=1, sticky="nw", padx=6, pady=2)
+                    entry.bind(
+                        "<Return>",
+                        lambda e, en=name, c=cid, rr=r, cj=j, w=entry: self._commit_ext_edit(e, en, c, rr, cj, w)
                     )
-                    lbl_val.grid(row=r_index, column=1, sticky="nw", padx=6, pady=2)
+                    entry.bind(
+                        "<FocusOut>",
+                        lambda e, en=name, c=cid, rr=r, cj=j, w=entry: self._commit_ext_edit(e, en, c, rr, cj, w)
+                    )
 
                     r_index += 1
 
+                # Separador entre registros de la extensión
+                ttk.Separator(ext_frame, orient="horizontal").grid(
+                    row=r_index, column=0, columnspan=2, sticky="ew", pady=6
+                )
+                r_index += 1
+
     def update_nav_label(self):
-        indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
+        indices = self._current_indices()
         if not indices:
             self.nav_label.config(text="0 / 0")
             return
@@ -377,14 +638,17 @@ class ViewerFrame(tk.Frame):
         total = len(indices)
         self.nav_label.config(text=f"{pos} / {total}")
 
+    # ---------------------------------------------------------------
+    # NAVEGACIÓN
+    # ---------------------------------------------------------------
     def go_first(self):
         self.active_index = 0
         self.load_record()
         self.update_right_window()
 
     def go_last(self):
-        indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
-        self.active_index = len(indices) - 1
+        indices = self._current_indices()
+        self.active_index = max(len(indices) - 1, 0)
         self.load_record()
         self.update_right_window()
 
@@ -395,7 +659,7 @@ class ViewerFrame(tk.Frame):
             self.update_right_window()
 
     def go_next(self):
-        indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
+        indices = self._current_indices()
         if self.active_index < len(indices) - 1:
             self.active_index += 1
             self.load_record()
@@ -404,11 +668,11 @@ class ViewerFrame(tk.Frame):
     def goto_record(self):
         try:
             num = int(self.goto_var.get())
-        except:
+        except ValueError:
             messagebox.showerror("Error", "Debe ser un número entero.")
             return
 
-        indices = range(len(self.core_rows)) if self.filtered_indices is None else self.filtered_indices
+        indices = self._current_indices()
 
         if num < 1 or num > len(indices):
             messagebox.showerror("Error", "Número fuera de rango.")
@@ -418,6 +682,9 @@ class ViewerFrame(tk.Frame):
         self.load_record()
         self.update_right_window()
 
+    # ---------------------------------------------------------------
+    # FILTRADO
+    # ---------------------------------------------------------------
     def apply_filter_inline(self):
         field = self.filter_field_var.get()
         value = self.filter_value_entry.get()

@@ -6,53 +6,69 @@ de delimitadores (; , \t) y codificación compatible con Windows (UTF-8 / CP1252
 """
 
 import os
+import shutil
 import zipfile
 import xml.etree.ElementTree as ET
 import csv
+
 
 def strip_ns(tag):
     if "}" in tag:
         return tag.split("}", 1)[1]
     return tag
 
+
 def short(term):
     return term.rsplit("/", 1)[-1] if term else ""
 
+
 def safe_open(filepath):
     """
-    Abre un archivo probando primero en UTF-8 y si falla (muy común en Windows),
+    Abre un archivo probando primero en UTF-8 (con y sin BOM) y si falla,
     recurre a la codificación nativa de Windows (cp1252 / ISO-8859-1).
+    No deja descriptores de archivo abiertos.
     """
     for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
         try:
-            f = open(filepath, "r", encoding=enc)
-            f.readline() # Prueba de lectura
-            f.seek(0)
-            return f
+            with open(filepath, "r", encoding=enc, newline="") as f:
+                f.readline()  # Prueba de lectura
+            return open(filepath, "r", encoding=enc, newline="")
         except UnicodeDecodeError:
             continue
     # Si todo falla, abrir por defecto reemplazando errores
-    return open(filepath, "r", encoding="utf-8", errors="replace")
+    return open(filepath, "r", encoding="utf-8", errors="replace", newline="")
+
 
 def detect_delimiter(filepath):
-    """Detecta automáticamente si el archivo usa ';', '\t' o ',' como separador."""
+    """
+    Detecta si el archivo usa ';', '\t' o ',' como separador,
+    muestreando varias líneas y con csv.Sniffer como respaldo.
+    """
     try:
         with safe_open(filepath) as f:
-            sample = f.readline()
-            if sample.count(";") > sample.count("\t") and sample.count(";") > sample.count(","):
-                return ";"
-            elif sample.count("\t") > sample.count(",") and sample.count("\t") > sample.count(";"):
-                return "\t"
-            elif "," in sample:
-                return ","
-            # Comprobaciones secundarias
-            if ";" in sample:
-                return ";"
-            elif "\t" in sample:
-                return "\t"
+            sample = "".join(f.readline() for _ in range(20))
     except Exception:
+        return "\t"
+
+    counts = {d: sample.count(d) for d in (";", "\t", ",")}
+    best = max(counts, key=counts.get)
+    if counts[best] > 0:
+        return best
+
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=";,\t").delimiter
+    except csv.Error:
         pass
+
+    # Comprobaciones secundarias
+    if ";" in sample:
+        return ";"
+    if "\t" in sample:
+        return "\t"
+    if "," in sample:
+        return ","
     return "\t"
+
 
 def inspect_txt_headers(folder_path):
     """
@@ -83,9 +99,12 @@ class DwcaLoader:
 
     def load(self, manual_schema=None):
         if self.path.lower().endswith(".zip"):
-            temp = os.path.join(os.path.dirname(self.path), "_dwca_temp")
-            if not os.path.exists(temp):
-                os.makedirs(temp)
+            # Directorio temporal único por ZIP: nunca mezcla restos de otro archivo
+            zip_name = os.path.splitext(os.path.basename(self.path))[0]
+            temp = os.path.join(os.path.dirname(self.path), f"_dwca_temp_{zip_name}")
+            if os.path.exists(temp):
+                shutil.rmtree(temp, ignore_errors=True)
+            os.makedirs(temp)
             with zipfile.ZipFile(self.path, "r") as z:
                 z.extractall(temp)
             self.base = temp
@@ -105,7 +124,7 @@ class DwcaLoader:
     def _parse_manual_schema(self, schema):
         core_fname = schema['core_file']
         core_path = os.path.join(self.base, core_fname)
-        
+
         core_fields = []
         core_rows = []
 
@@ -140,7 +159,7 @@ class DwcaLoader:
                 if not headers:
                     continue
                 fields = [h.strip() for h in headers]
-                
+
                 fk_col = ext_conf.get('fk_col')
                 fk_idx = fields.index(fk_col) if fk_col and fk_col in fields else 0
 

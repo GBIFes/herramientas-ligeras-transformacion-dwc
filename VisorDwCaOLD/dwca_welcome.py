@@ -1,0 +1,243 @@
+"""
+dwca_welcome.py
+==============
+Ventana de bienvenida y selector de esquemas en estrella sin meta.xml
+"""
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import zipfile
+import os
+
+from dwca_loader import inspect_txt_headers
+from dwca_access import export_zip_to_access
+from dwca_excel import export_zip_to_excel
+
+
+class StarSchemaDialog(tk.Toplevel):
+    def __init__(self, parent, headers_map):
+        super().__init__(parent)
+        self.title("Configuración de Esquema en Estrella")
+        self.geometry("820x580")
+        self.transient(parent)
+        self.grab_set()
+
+        self.headers_map = headers_map
+        self.result_schema = None
+
+        self._build_ui()
+
+    def _build_ui(self):
+        lbl_info = tk.Label(
+            self,
+            text="Seleccione la Tabla Core (principal) y su columna ID. Para cada brazo o tabla relacionada, elija la columna que actúa como clave foránea:",
+            font=("Segoe UI", 10, "bold"),
+            wraplength=780,
+            justify="left"
+        )
+        lbl_info.pack(anchor="w", padx=15, pady=10)
+
+        # ---- SELECCIÓN DE CORE ----
+        frame_core = ttk.LabelFrame(self, text=" 1. Tabla Core ")
+        frame_core.pack(fill="x", padx=15, pady=5)
+
+        tk.Label(frame_core, text="Archivo Core:").grid(row=0, column=0, padx=8, pady=8, sticky="e")
+        self.combo_core = ttk.Combobox(frame_core, values=list(self.headers_map.keys()), state="readonly", width=25)
+        self.combo_core.grid(row=0, column=1, padx=8, pady=8, sticky="w")
+        self.combo_core.bind("<<ComboboxSelected>>", self._on_core_changed)
+
+        tk.Label(frame_core, text="Campo ID (Clave):").grid(row=0, column=2, padx=8, pady=8, sticky="e")
+        self.combo_core_id = ttk.Combobox(frame_core, state="readonly", width=25)
+        self.combo_core_id.grid(row=0, column=3, padx=8, pady=8, sticky="w")
+
+        # ---- SELECCIÓN DE CLAVES FORÁNEAS (BRAZOS DE LA ESTRELLA) ----
+        self.frame_ext = ttk.LabelFrame(self, text=" 2. Pestañas de Archivos Relacionados (Brazos y Claves Foráneas) ")
+        self.frame_ext.pack(fill="both", expand=True, padx=15, pady=10)
+
+        self.canvas_ext = tk.Canvas(self.frame_ext, highlightthickness=0)
+        self.scroll_ext = ttk.Scrollbar(self.frame_ext, orient="vertical", command=self.canvas_ext.yview)
+        self.container_ext = ttk.Frame(self.canvas_ext)
+
+        self.container_ext.bind(
+            "<Configure>",
+            lambda e: self.canvas_ext.configure(scrollregion=self.canvas_ext.bbox("all"))
+        )
+        self.canvas_ext.create_window((0, 0), window=self.container_ext, anchor="nw")
+        self.canvas_ext.configure(yscrollcommand=self.scroll_ext.set)
+
+        self.canvas_ext.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.scroll_ext.pack(side="right", fill="y", pady=5)
+
+        self.ext_widgets = {}
+
+        files = list(self.headers_map.keys())
+        if files:
+            self.combo_core.set(files[0])
+            self._on_core_changed(None)
+
+        # Botones de acción inferior
+        frame_btns = ttk.Frame(self)
+        frame_btns.pack(fill="x", padx=15, pady=10)
+
+        btn_ok = tk.Button(frame_btns, text="Cargar Pestañas", bg="#289530", fg="white", font=("Segoe UI", 10, "bold"), command=self._on_accept)
+        btn_ok.pack(side="right", padx=5)
+
+        btn_cancel = tk.Button(frame_btns, text="Cancelar", command=self.destroy)
+        btn_cancel.pack(side="right", padx=5)
+
+    def _on_core_changed(self, event):
+        core_file = self.combo_core.get()
+        cols = self.headers_map.get(core_file, [])
+        self.combo_core_id["values"] = cols
+
+        if "id" in cols:
+            self.combo_core_id.set("id")
+        elif cols:
+            self.combo_core_id.set(cols[0])
+
+        for child in self.container_ext.winfo_children():
+            child.destroy()
+
+        self.ext_widgets.clear()
+
+        row = 0
+        for fname, fields in self.headers_map.items():
+            if fname == core_file:
+                continue
+
+            lbl_f = tk.Label(self.container_ext, text=f"• {fname}", font=("Segoe UI", 9, "bold"), anchor="w", width=28)
+            lbl_f.grid(row=row, column=0, padx=8, pady=6, sticky="w")
+
+            lbl_fk = tk.Label(self.container_ext, text="Columna Clave Foránea:", anchor="e")
+            lbl_fk.grid(row=row, column=1, padx=8, pady=6, sticky="e")
+
+            combo_fk = ttk.Combobox(self.container_ext, values=fields, state="readonly", width=32)
+            combo_fk.grid(row=row, column=2, padx=8, pady=6, sticky="w")
+
+            if "coreid" in fields:
+                combo_fk.set("coreid")
+            elif "id" in fields:
+                combo_fk.set("id")
+            elif fields:
+                combo_fk.set(fields[0])
+
+            self.ext_widgets[fname] = combo_fk
+            row += 1
+
+    def _on_accept(self):
+        core_file = self.combo_core.get()
+        core_id_col = self.combo_core_id.get()
+
+        if not core_file or not core_id_col:
+            messagebox.showwarning("Incompleto", "Por favor, seleccione el archivo Core y su columna ID.", parent=self)
+            return
+
+        ext_list = []
+        for fname, combo_fk in self.ext_widgets.items():
+            ext_list.append({
+                'file': fname,
+                'fk_col': combo_fk.get()
+            })
+
+        self.result_schema = {
+            'core_file': core_file,
+            'core_id_col': core_id_col,
+            'extensions': ext_list
+        }
+        self.destroy()
+
+
+class WelcomeFrame(tk.Frame):
+    def __init__(self, root, viewer):
+        super().__init__(root)
+        self.root = root
+        self.viewer = viewer
+        self.eml_viewer_class = None
+
+        tk.Label(
+            self,
+            text="Visor DwC-A GBIF.ES",
+            font=("Segoe UI", 22, "bold"),
+            fg="#289530"
+        ).pack(pady=20)
+
+        tk.Button(
+            self,
+            text="Abrir DwC-A (ZIP)",
+            font=("Segoe UI", 14),
+            bg="#289530",
+            fg="white",
+            command=self.open_zip
+        ).pack(pady=10)
+
+        tk.Button(
+            self,
+            text="Exportar DwC-A a Access (.accdb)",
+            font=("Segoe UI", 14),
+            bg="#1f6fb2",
+            fg="white",
+            command=lambda: export_zip_to_access(self.root)
+        ).pack(pady=10)
+
+        tk.Button(
+            self,
+            text="Exportar DwC-A a Excel (.xlsx)",
+            font=("Segoe UI", 14),
+            bg="#217346",
+            fg="white",
+            command=lambda: export_zip_to_excel(self.root)
+        ).pack(pady=10)
+
+    def set_eml_viewer_class(self, cls):
+        self.eml_viewer_class = cls
+
+    def open_zip(self):
+        path = filedialog.askopenfilename(
+            title="Seleccionar DwC-A (ZIP)",
+            filetypes=[("DwC-A ZIP", "*.zip")]
+        )
+        if not path:
+            return
+
+        temp = os.path.join(os.path.dirname(path), "_dwca_temp")
+        if not os.path.exists(temp):
+            os.makedirs(temp)
+
+        try:
+            with zipfile.ZipFile(path, "r") as z:
+                z.extractall(temp)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo descomprimir el archivo ZIP:\n{e}")
+            return
+
+        meta = os.path.join(temp, "meta.xml")
+        eml = os.path.join(temp, "eml.xml")
+
+        manual_schema = None
+
+        if not os.path.exists(meta):
+            headers_map = inspect_txt_headers(temp)
+            if not headers_map:
+                messagebox.showerror("Error", "No se encontraron archivos .txt o .csv válidos dentro del paquete ZIP.")
+                return
+
+            dialog = StarSchemaDialog(self.root, headers_map)
+            self.root.wait_window(dialog)
+            manual_schema = dialog.result_schema
+
+            if not manual_schema:
+                return
+
+        try:
+            self.pack_forget()
+            if hasattr(self.viewer, 'load_with_schema'):
+                self.viewer.load_with_schema(meta if os.path.exists(meta) else path, manual_schema=manual_schema)
+            else:
+                self.viewer.load(meta if os.path.exists(meta) else path)
+            self.viewer.pack(fill="both", expand=True)
+        except Exception as e:
+            messagebox.showerror("Error al cargar", f"Ocurrió un error al procesar las tablas:\n{e}")
+            return
+
+        if self.eml_viewer_class and os.path.exists(eml):
+            self.eml_viewer_class(self.root, eml)
