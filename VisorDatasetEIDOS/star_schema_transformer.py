@@ -1,7 +1,7 @@
 """
 star_schema_transformer.py
 ==========================
-Módulo de transformación, normalización y búsqueda avanzada para el 
+Módulo de transformación, normalización y búsqueda avanzada para el
 esquema en estrella Darwin Core (Taxon, MeasurementsOfFacts, VernacularName).
 """
 
@@ -30,15 +30,21 @@ class StarSchemaTransformer:
         if not self.vernacular_df.empty:
             # Normalizar textos
             self.vernacular_df["vernacularName"] = self.vernacular_df["vernacularName"].astype(str).str.strip()
-            
-            # Agrupar nombres comunes por taxonID separados por comas
-            vernacular_agg = self.vernacular_df.groupby("taxonID").agg({
-                "vernacularName": lambda x: ", ".join(x.unique()),
-                "languaje": lambda x: ", ".join(str(v) for v in x.unique() if pd.notna(v))
-            }).reset_index().rename(columns={
+
+            # Localizar la columna de idioma (language / languaje / idioma)
+            lang_col = next(
+                (c for c in self.vernacular_df.columns if c.lower() in ("language", "languaje", "idioma")),
+                None
+            )
+
+            agg_spec = {"vernacularName": lambda x: ", ".join(x.unique())}
+            if lang_col:
+                agg_spec[lang_col] = lambda x: ", ".join(str(v) for v in x.unique() if pd.notna(v))
+
+            vernacular_agg = self.vernacular_df.groupby("taxonID").agg(agg_spec).reset_index().rename(columns={
                 "vernacularName": "nombres_comunes",
-                "languaje": "idiomas_vernaculos"
-            })
+                lang_col: "idiomas_vernaculos"
+            } if lang_col else {"vernacularName": "nombres_comunes"})
 
         # 2. Transformación de Mediciones (MeasurementsOfFacts -> Pivote a columnas o resumen)
         measurements_agg = pd.DataFrame()
@@ -46,7 +52,7 @@ class StarSchemaTransformer:
             # Si hay tipos de mediciones específicas, podemos pivotarlas o mantenerlas resumidas
             self.measurements_df["measurementType"] = self.measurements_df["measurementType"].astype(str).str.strip()
             self.measurements_df["measurementValue"] = self.measurements_df["measurementValue"].astype(str).str.strip()
-            
+
             # Crear un resumen concatenado de atributos/mediciones
             self.measurements_df["medicion_detalle"] = (
                 self.measurements_df["measurementType"] + ": " + self.measurements_df["measurementValue"]
@@ -57,7 +63,7 @@ class StarSchemaTransformer:
 
         # 3. Cruce en Estrella (Star Join) con la tabla central Taxon
         base = self.taxon_df.copy()
-        
+
         # Limpieza básica de la tabla central
         for col in ["scientificName", "kingdom", "family", "genus", "taxonomicStatus"]:
             if col in base.columns:
@@ -65,7 +71,7 @@ class StarSchemaTransformer:
 
         if not vernacular_agg.empty:
             base = base.merge(vernacular_agg, on="taxonID", how="left")
-            
+
         if not measurements_agg.empty:
             base = base.merge(measurements_agg, on="taxonID", how="left")
 
@@ -102,6 +108,6 @@ class StarSchemaTransformer:
                     mask = df[field].astype(str).str.lower().str.contains(q, na=False)
                     return df[mask].reset_index(drop=True)
         except Exception as ex:
-            print(fs:=f"Error en búsqueda: {ex}")
-            
+            print(f"Error en búsqueda: {ex}")
+
         return df

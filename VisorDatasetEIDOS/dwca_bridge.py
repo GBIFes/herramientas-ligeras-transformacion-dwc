@@ -2,7 +2,7 @@
 dwca_bridge.py
 ==============
 Puente gestor para la exportación a Darwin Core Archive (DwCa),
-integrando parámetros personalizados y callback de progreso.
+integrando parámetros personalizados y el selector de ámbito territorial.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ class DwCaBridge:
         base_name: str = "lesrpe_dwca", 
         measurement_type: str = None, 
         dataset_acronym: str = None,
+        default_national_scope: bool = False,
         progress_callback=None
     ) -> Path:
         transformer = DwCaTransformer(self.output_dir)
@@ -30,6 +31,7 @@ class DwCaBridge:
             progress_callback=progress_callback,
             measurement_type=measurement_type, 
             dataset_acronym=dataset_acronym,
+            default_national_scope=default_national_scope,
             mof_prefix=dataset_acronym,
             vn_prefix=dataset_acronym
         )

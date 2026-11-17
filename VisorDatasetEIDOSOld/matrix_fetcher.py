@@ -3,10 +3,10 @@
 import pandas as pd
 
 from config import (
-    BASE_URL_API,
+    BASE_URL,
     CATEGORY_ENDPOINTS,
     REQUEST_TIMEOUT,
-    crear_sesion_robusta as create_session
+    create_session
 )
 
 
@@ -28,7 +28,7 @@ class MatrixFetcher:
                 ]
             )
 
-        url = f"{BASE_URL_API}/{endpoint}"
+        url = f"{BASE_URL}/{endpoint}"
 
         r = self.session.get(
             url,
@@ -49,25 +49,12 @@ class MatrixFetcher:
 
         df = pd.DataFrame(data)
 
-        # Adapta el nombre de columnas según la vista devuelta por la API
-        id_col = next(
-            (c for c in ("taxonid", "idtaxon", "taxon_id") if c in df.columns),
-            None
-        )
-        name_col = next(
-            (c for c in ("scientificname", "nombre_aceptado", "nombre_cientifico") if c in df.columns),
-            None
-        )
+        cols = {
+            "taxonid": "EIDOS_ID",
+            "scientificname": "scientificName"
+        }
 
-        if not id_col or not name_col:
-            return pd.DataFrame(
-                columns=[
-                    "EIDOS_ID",
-                    "scientificName"
-                ]
-            )
-
-        df = df.rename(columns={id_col: "EIDOS_ID", name_col: "scientificName"})
+        df = df.rename(columns=cols)
 
         return df[
             [

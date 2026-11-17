@@ -4,9 +4,20 @@ eidos_api.py
 
 Cliente de acceso a la API EIDOS con soporte de vistas dinámicas
 y compatibilidad con métodos auxiliares.
+
+Correcciones:
+- Nuevo método get_datasets_distinct(): lista ligera de datasets mediante
+  select + distinct de PostgREST, evitando descargar la vista completa.
+- fetch() con reintentos persistentes y backoff exponencial: ante un error
+  transitorio (429, 5xx, timeout, conexión) reintenta hasta MAX_FETCH_ATTEMPTS
+  antes de propagar la excepción, evitando que se pierdan datos por saturación.
 """
 
 from __future__ import annotations
+
+import logging
+import time
+import urllib.parse
 
 import pandas as pd
 import requests
@@ -15,6 +26,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+logger = logging.getLogger("EidosAPI")
+
 BASE_URL = (
     "https://pro.iepnb.gob.es/"
     "api/especie"
@@ -22,6 +35,7 @@ BASE_URL = (
 
 DEFAULT_PAGE_SIZE = 10000
 DEFAULT_TIMEOUT = 120
+MAX_FETCH_ATTEMPTS = 6
 
 
 class EidosAPI:
@@ -64,7 +78,8 @@ class EidosAPI:
 
         if filters:
             for key, value in filters.items():
-                params.append(f"{key}=eq.{value}")
+                # Codificación segura para espacios, acentos y caracteres especiales
+                params.append(f"{key}=eq.{urllib.parse.quote(str(value), safe='')}")
 
         if limit is not None:
             params.append(f"limit={limit}")
@@ -90,9 +105,27 @@ class EidosAPI:
             offset=offset,
             view_name=view_name
         )
-        response = self.session.get(url, timeout=DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        return pd.DataFrame(response.json())
+
+        # CORREGIDO: reintentos persistentes con backoff exponencial.
+        # Un fallo transitorio ya no descarta la página: se reintenta
+        # hasta MAX_FETCH_ATTEMPTS antes de propagar el error.
+        last_exc = None
+        for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
+            try:
+                response = self.session.get(url, timeout=DEFAULT_TIMEOUT)
+                response.raise_for_status()
+                return pd.DataFrame(response.json())
+            except Exception as ex:
+                last_exc = ex
+                wait = min(30, 2 ** attempt)
+                logger.warning(
+                    f"Intento {attempt}/{MAX_FETCH_ATTEMPTS} fallido "
+                    f"({view_name or self.view_name}, offset={offset}): {ex}. "
+                    f"Reintentando en {wait}s..."
+                )
+                time.sleep(wait)
+
+        raise last_exc
 
     def fetch_all(
         self,
@@ -121,6 +154,29 @@ class EidosAPI:
             return pd.DataFrame()
 
         return pd.concat(dfs, ignore_index=True)
+
+    # --------------------------------------------------
+    # LISTA LIGERA DE DATASETS (PostgREST distinct)
+    # --------------------------------------------------
+
+    def get_datasets_distinct(self, view_name=None):
+        """
+        Lista ligera de datasets: solo las columnas necesarias y valores únicos.
+        Evita descargar la vista completa solo para poblar el árbol.
+        Si la vista no tiene alguna columna (p. ej. ambito), PostgREST devuelve
+        error 400 y el llamante debe usar el fallback completo.
+        """
+        v_name = view_name or self.view_name
+        url = f"{BASE_URL}/{v_name}"
+        query = (
+            "select=iddataset,dataset,ambito"
+            "&distinct=on(iddataset)"
+            "&order=iddataset.asc"
+            "&limit=10000"
+        )
+        response = self.session.get(f"{url}?{query}", timeout=DEFAULT_TIMEOUT)
+        response.raise_for_status()
+        return pd.DataFrame(response.json())
 
     # --------------------------------------------------
     # MÉTODOS COMPATIBLES Y ESPECÍFICOS
@@ -181,14 +237,14 @@ class EidosAPI:
             return df
 
         if "idvigente" in df.columns:
-            df = df[df["idvigente"] == 1]
+            df = df[df["idvigente"].astype(str).isin(["1", "1.0"])]
 
         grouped = {}
 
         for _, row in df.iterrows():
             taxon = row.get("idtaxon")
             nombre = row.get("nombre_aceptado")
-            estado = str(row.get("estadolegal", ""))
+            estado = str(row.get("estadolegal", "")).lower()
 
             if taxon not in grouped:
                 grouped[taxon] = {
@@ -199,13 +255,13 @@ class EidosAPI:
                     "CEEA_VU": "No"
                 }
 
-            if "LESRPE" in estado:
+            if "lesrpe" in estado or "protección especial" in estado:
                 grouped[taxon]["LESRPE"] = "Yes"
 
-            if "En peligro" in estado:
+            if "en peligro" in estado:
                 grouped[taxon]["CEEA_EN"] = "Yes"
 
-            if "Vulnerable" in estado:
+            if "vulnerable" in estado:
                 grouped[taxon]["CEEA_VU"] = "Yes"
 
         return pd.DataFrame(

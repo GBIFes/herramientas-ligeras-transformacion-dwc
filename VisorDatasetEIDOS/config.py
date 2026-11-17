@@ -1,32 +1,56 @@
 """
 config.py
 =========
-Configuraciones globales, constantes lingüísticas (IDIOMA_PAIS), sesiones robustas 
-y funciones auxiliares para la interacción con EIDOS.
+Configuraciones globales y sesiones robustas para la interacción con EIDOS.
 """
 
 import os
-import re
-import csv
 import platform
 import subprocess
-import webbrowser
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from bs4 import BeautifulSoup
-import pandas as pd
-import tkinter as tk
 
+# API REST oficial del IEPNB
+BASE_URL_API = "https://pro.iepnb.gob.es/api/especie"
+
+# Portal web de consulta (fichas de taxón)
 BASE_URL = "https://iepnb.gob.es/areas-tematicas/especies-silvestres/eidos"
 
-IDIOMA_PAIS = {
-    "Castellano": "ES", "Catalán": "ES", "Euskera": "ES", "Gallego": "ES",
-    "Valenciano": "ES", "Mallorquín": "ES", "Altoaragonés": "ES", "Inglés": "GB",
-    "Francés": "FR", "Portugués": "PT", "Italiano": "IT", "Alemán": "DE",
+REQUEST_TIMEOUT = 120
+
+# Endpoints por categoría (sintaxis PostgREST) usados por matrix_fetcher.py
+CATEGORY_ENDPOINTS = {
+    "LESRPE": "v_estadolegal?iddataset=eq.12",
+    "CEEA_EN": "v_estadolegal?iddataset=eq.12&estadolegal=ilike.*En peligro*",
+    "CEEA_VU": "v_estadolegal?iddataset=eq.12&estadolegal=ilike.*Vulnerable*",
+    "Invasoras UE": "v_estadolegal?iddataset=eq.38",
 }
 
-SEPARADOR_NOMBRES_REGEX = re.compile(r'\s*[;]\s*|\s*,\s+(?=[A-ZÁÉÍÓÚÑa-záéíóúñ])')
+# Mapeo de idioma (nombre en EIDOS) -> código ISO 639-1
+IDIOMA_CODIGO = {
+    "castellano": "es", "español": "es", "espanol": "es",
+    "catalán": "ca", "catalan": "ca", "valenciano": "ca", "mallorquín": "ca",
+    "euskera": "eu", "vasco": "eu",
+    "gallego": "gl", "galego": "gl",
+    "inglés": "en", "english": "en",
+    "francés": "fr", "francais": "fr",
+    "portugués": "pt", "portugues": "pt",
+    "italiano": "it",
+    "alemán": "de", "aleman": "de",
+    "altoaragonés": "es",
+}
+
+
+def codigo_idioma(idioma_raw: str) -> str:
+    """Traduce el nombre de idioma de EIDOS a código ISO 639-1."""
+    texto = (idioma_raw or "").strip().lower()
+    for nombre, codigo in IDIOMA_CODIGO.items():
+        if nombre in texto:
+            return codigo
+    return "es"
+
 
 def crear_sesion_robusta():
     """Crea una sesión HTTP con reintentos automáticos y cabeceras estándar."""
@@ -39,7 +63,7 @@ def crear_sesion_robusta():
         status_forcelist=[429, 500, 502, 503, 504],
         raise_on_status=False
     )
-    adapter = HTTPAdapter(max_retries=retries)
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({
@@ -47,37 +71,9 @@ def crear_sesion_robusta():
     })
     return session
 
-def detectar_codificacion(ruta):
-    for enc in ["utf-8", "utf-8-sig", "latin-1", "cp1252"]:
-        try:
-            with open(ruta, "r", encoding=enc) as f:
-                f.read()
-            return enc
-        except:
-            pass
-    return "latin-1"
-
-def detectar_dialect(ruta):
-    encoding = detectar_codificacion(ruta)
-    with open(ruta, "r", encoding=encoding, errors="ignore") as f:
-        muestra = f.read(4096)
-    posibles = [",", ";", "\t", "|"]
-    try:
-        dialect = csv.Sniffer().sniff(muestra, delimiters=posibles)
-        return dialect
-    except:
-        conteos = {sep: muestra.count(sep) for sep in posibles}
-        separador = max(conteos, key=conteos.get)
-        class Dialect(csv.Dialect):
-            delimiter = separador
-            quotechar = '"'
-            doublequote = True
-            skipinitialspace = True
-            lineterminator = "\n"
-            quoting = csv.QUOTE_MINIMAL
-        return Dialect
 
 def abrir_archivo_sistema(ruta):
+    """Abre un archivo con la aplicación predeterminada del sistema."""
     try:
         if platform.system() == "Windows":
             os.startfile(ruta)
@@ -87,21 +83,3 @@ def abrir_archivo_sistema(ruta):
             subprocess.call(["xdg-open", ruta])
     except Exception as e:
         print(f"No se pudo abrir el archivo automáticamente: {e}")
-
-def obtener_url_y_id_por_busqueda_texto(session, texto_busqueda):
-    search_url = f"{BASE_URL}?search_api_fulltext={requests.utils.quote(texto_busqueda)}"
-    try:
-        resp = session.get(search_url, timeout=20)
-        resp.raise_for_status()
-    except:
-        return None, ""
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        href = a['href']
-        if "/eidos/" in href:
-            full_url = href if href.startswith("http") else "https://iepnb.gob.es" + href
-            match = re.search(r'/eidos/(\d+)', full_url)
-            eidos_id = match.group(1) if match else ""
-            return full_url, eidos_id
-    return None, ""

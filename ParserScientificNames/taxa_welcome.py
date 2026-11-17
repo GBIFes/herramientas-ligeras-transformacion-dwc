@@ -3,6 +3,12 @@ taxa_welcome.py
 ==============
 Ventana de bienvenida y configuración con la estructura visual y robusta
 de ScrapEIDOS (scroll global, canvas, selectores de archivo, columnas y progreso).
+
+Correcciones incluidas:
+- Scroll fiable: scrollregion actualizada tras construir el contenido, ancho del
+  marco interior ajustado al canvas, y rueda del ratón que solo actúa cuando el
+  cursor está sobre el panel (compatible Windows/Linux/macOS).
+- Recuadro de ayuda ampliado con la explicación de las columnas p_* y gbif_*.
 """
 
 import sys
@@ -32,14 +38,16 @@ class TaxaWelcomeFrame(tk.Frame):
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=main_canvas.yview)
         scrollable_frame = tk.Frame(main_canvas)
 
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
-        )
-
         canvas_window = main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
+        def _on_frame_configure(event):
+            # Actualizar la región de desplazamiento al tamaño real del contenido
+            main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+
+        scrollable_frame.bind("<Configure>", _on_frame_configure)
+
         def _on_canvas_configure(event):
+            # El marco interior ocupa siempre todo el ancho visible del canvas
             main_canvas.itemconfig(canvas_window, width=event.width)
 
         main_canvas.bind("<Configure>", _on_canvas_configure)
@@ -49,12 +57,41 @@ class TaxaWelcomeFrame(tk.Frame):
         scrollbar.pack(side="right", fill="y")
 
         def _on_mousewheel(event):
+            # Solo desplazar si el cursor está sobre este panel
             try:
-                main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                bajo_cursor = self.winfo_containing(event.x_root, event.y_root)
             except Exception:
-                pass
+                return
+            widget = bajo_cursor
+            dentro = False
+            while widget is not None:
+                if widget is main_canvas or widget is scrollable_frame:
+                    dentro = True
+                    break
+                widget = getattr(widget, "master", None)
+            if not dentro:
+                return
+            if sys.platform == "darwin":
+                paso = event.delta
+            elif sys.platform == "win32":
+                paso = int(-1 * (event.delta / 120))
+            else:
+                return
+            if paso:
+                main_canvas.yview_scroll(paso, "units")
+
+        def _on_scroll_up(event):
+            main_canvas.yview_scroll(-1, "units")
+
+        def _on_scroll_down(event):
+            main_canvas.yview_scroll(1, "units")
 
         main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        # Linux (X11): botones 4/5 de la rueda
+        main_canvas.bind_all("<Button-4>", _on_scroll_up)
+        main_canvas.bind_all("<Button-5>", _on_scroll_down)
+
+        self._liberar_scroll = self._crear_liberador_scroll(main_canvas)
 
         def actualizar_estado_boton():
             col_target = combo_columna.get().strip()
@@ -73,7 +110,7 @@ class TaxaWelcomeFrame(tk.Frame):
                 return
             self.ruta_csv["path"] = f
             label_csv.config(text=f, fg="#000000")
-            
+
             dir_por_defecto = os.path.dirname(f)
             self.dir_salida["path"] = dir_por_defecto
             salida_entry.delete(0, tk.END)
@@ -109,7 +146,7 @@ class TaxaWelcomeFrame(tk.Frame):
             if not self.ruta_csv["path"]:
                 messagebox.showerror("Error", "Selecciona primero un archivo de entrada.", parent=self.root)
                 return
-            
+
             col_target = combo_columna.get().strip()
             if not col_target or col_target == "(Ninguna)":
                 messagebox.showerror("Error", "Debes seleccionar la columna que contiene los nombres científicos.", parent=self.root)
@@ -119,7 +156,7 @@ class TaxaWelcomeFrame(tk.Frame):
             if not dir_destino_final:
                 messagebox.showerror("Error", "Selecciona un directorio de salida.", parent=self.root)
                 return
-            
+
             self.dir_salida["path"] = dir_destino_final
             base_name, ext = os.path.splitext(os.path.basename(self.ruta_csv["path"]))
             output_filepath = os.path.join(dir_destino_final, f"{base_name}_ParserAutores{ext}")
@@ -133,22 +170,24 @@ class TaxaWelcomeFrame(tk.Frame):
             def run_processing():
                 try:
                     fields, rows = process_taxa_file(
-                        self.ruta_csv["path"], 
-                        col_target, 
-                        output_filepath=output_filepath, 
+                        self.ruta_csv["path"],
+                        col_target,
+                        output_filepath=output_filepath,
                         progress_callback=lambda cur, tot: self.root.after(0, lambda: update_prog_gui(cur, tot))
                     )
-                    
+
                     def on_success():
                         progress_bar["value"] = 100
                         lbl_progreso.config(text="¡Procesamiento completado con éxito!")
                         btn_run.config(state=tk.NORMAL, bg="#289530")
+                        if self._liberar_scroll:
+                            self._liberar_scroll()
                         self.pack_forget()
                         self.viewer.load_data(fields, rows, output_filepath=output_filepath)
                         self.viewer.pack(fill="both", expand=True)
-                    
+
                     self.root.after(0, on_success)
-                    
+
                 except Exception as e:
                     err_msg = str(e)
                     def on_error():
@@ -166,7 +205,7 @@ class TaxaWelcomeFrame(tk.Frame):
             threading.Thread(target=run_processing, daemon=True).start()
 
         # --- Contenido de la Interfaz (Estructura ScrapEIDOS) ---
-        
+
         # Título Superior
         lbl_title = tk.Label(
             scrollable_frame,
@@ -186,7 +225,18 @@ class TaxaWelcomeFrame(tk.Frame):
             "  siguiendo las normativas ICN/ICZN y contrastándolos automáticamente con la API de GBIF.\n"
             "📂 ENTRADA: Archivos de texto plano (.txt) o separados por comas/delimitadores (.csv).\n"
             "📦 SALIDA: Copia enriquecida con sufijo '_ParserAutores', columnas Darwin Core, reporte de discrepancias\n"
-            "  y opción de exportación adicional a Excel (.xlsx) y Access (.accdb)."
+            "  y opción de exportación adicional a Excel (.xlsx) y Access (.accdb).\n"
+            "\n"
+            "🔎 SOBRE LAS COLUMNAS DEL RESULTADO:\n"
+            "• Columnas p_* (parseo local): se calculan en su equipo aplicando las reglas ICN/ICZN directamente\n"
+            "  sobre el texto del nombre (p_genus, p_specificEpithet, p_authorSpecies, p_taxonRank...).\n"
+            "  Responden a '¿qué dice la cadena de texto?' y siempre se rellenan, haya o no conexión a internet.\n"
+            "• Columnas gbif_* (contraste con GBIF): provienen de la base de datos taxonómica mundial GBIF\n"
+            "  (gbif_status: ACCEPTED/SYNONYM/DOUBTFUL..., gbif_usageKey, gbif_uri, gbif_taxonomy con la jerarquía\n"
+            "  completa kingdom→subgenus, y gbif_matchType: EXACT/FUZZY/NONE).\n"
+            "• ¿Por qué existen las dos? Porque su valor está en compararlas: p_genus vs gbif_genus o el epíteto\n"
+            "  local frente a gbif_scientificName detectan erratas y nombres mal formados (ver gbif_discrepancy),\n"
+            "  y un nombre puede parsear perfectamente a nivel local y aun así ser un sinónimo en GBIF."
         )
 
         lbl_desc = tk.Label(frame_desc, text=lbl_info_texto, font=("Segoe UI", 9), bg="#F5F5F5", fg="#333333", justify="left", wraplength=700)
@@ -209,7 +259,7 @@ class TaxaWelcomeFrame(tk.Frame):
         f_sel1 = tk.Frame(frame_criterio)
         f_sel1.pack(fill="x", pady=2)
         tk.Label(f_sel1, text="Columna Objetivo:", font=("Segoe UI", 9, "bold"), width=16, anchor="w").pack(side="left")
-        
+
         combo_columna = ttk.Combobox(f_sel1, state="readonly", width=40, font=("Segoe UI", 9))
         combo_columna.pack(side="left", padx=5)
         combo_columna.bind("<<ComboboxSelected>>", lambda e: actualizar_estado_boton())
@@ -223,7 +273,7 @@ class TaxaWelcomeFrame(tk.Frame):
         f_sal = tk.Frame(frame_salida)
         f_sal.pack(fill="x", pady=2)
         tk.Label(f_sal, text="Carpeta Destino:", font=("Segoe UI", 9, "bold"), width=15, anchor="w").pack(side="left")
-        
+
         salida_entry = tk.Entry(f_sal, width=42, font=("Segoe UI", 9))
         salida_entry.pack(side="left", padx=(0, 5), fill="x", expand=True)
 
@@ -241,16 +291,29 @@ class TaxaWelcomeFrame(tk.Frame):
         progress_bar.pack(fill="x", pady=4)
 
         # Botón Principal (Inicia deshabilitado)
-        global btn_run
         btn_run = tk.Button(
-            scrollable_frame, 
-            text="🚀 Iniciar Parseo y Contraste GBIF", 
-            command=ejecutar, 
-            bg="#CCCCCC", 
-            fg="white", 
-            font=("Segoe UI", 10, "bold"), 
-            height=1, 
-            width=32, 
+            scrollable_frame,
+            text="🚀 Iniciar Parseo y Contraste GBIF",
+            command=ejecutar,
+            bg="#CCCCCC",
+            fg="white",
+            font=("Segoe UI", 10, "bold"),
+            height=1,
+            width=32,
             state=tk.DISABLED
         )
         btn_run.pack(pady=15)
+
+        # Ajustar la región de desplazamiento una vez construido todo el contenido
+        self.bind("<Configure>", _on_frame_configure)
+
+    def _crear_liberador_scroll(self, main_canvas):
+        """Devuelve una función que libera los bindings globales de la rueda."""
+        def liberar():
+            try:
+                main_canvas.unbind_all("<MouseWheel>")
+                main_canvas.unbind_all("<Button-4>")
+                main_canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+        return liberar

@@ -282,17 +282,9 @@ class Exporter:
 
         try:
 
-            import platform
-            import subprocess
-
-            system = platform.system()
-
-            if system == "Windows":
-                os.startfile(str(excel_file))
-            elif system == "Darwin":
-                subprocess.call(["open", str(excel_file)])
-            else:
-                subprocess.call(["xdg-open", str(excel_file)])
+            os.startfile(
+                str(excel_file)
+            )
 
             return True
 

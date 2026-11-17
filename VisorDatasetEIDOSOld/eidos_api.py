@@ -8,8 +8,6 @@ y compatibilidad con métodos auxiliares.
 
 from __future__ import annotations
 
-import urllib.parse
-
 import pandas as pd
 import requests
 
@@ -66,8 +64,7 @@ class EidosAPI:
 
         if filters:
             for key, value in filters.items():
-                # Codificación segura para espacios, acentos y caracteres especiales
-                params.append(f"{key}=eq.{urllib.parse.quote(str(value), safe='')}")
+                params.append(f"{key}=eq.{value}")
 
         if limit is not None:
             params.append(f"limit={limit}")
@@ -184,14 +181,14 @@ class EidosAPI:
             return df
 
         if "idvigente" in df.columns:
-            df = df[df["idvigente"].astype(str).isin(["1", "1.0"])]
+            df = df[df["idvigente"] == 1]
 
         grouped = {}
 
         for _, row in df.iterrows():
             taxon = row.get("idtaxon")
             nombre = row.get("nombre_aceptado")
-            estado = str(row.get("estadolegal", "")).lower()
+            estado = str(row.get("estadolegal", ""))
 
             if taxon not in grouped:
                 grouped[taxon] = {
@@ -202,13 +199,13 @@ class EidosAPI:
                     "CEEA_VU": "No"
                 }
 
-            if "lesrpe" in estado or "protección especial" in estado:
+            if "LESRPE" in estado:
                 grouped[taxon]["LESRPE"] = "Yes"
 
-            if "en peligro" in estado:
+            if "En peligro" in estado:
                 grouped[taxon]["CEEA_EN"] = "Yes"
 
-            if "vulnerable" in estado:
+            if "Vulnerable" in estado:
                 grouped[taxon]["CEEA_VU"] = "Yes"
 
         return pd.DataFrame(
