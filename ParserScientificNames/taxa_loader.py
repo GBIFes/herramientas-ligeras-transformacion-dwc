@@ -1,9 +1,9 @@
 """
 taxa_loader.py
 ==============
-Procesa archivos aplicando el parseo taxonómico y contraste con GBIF.
+Procesa archivos aplicando el parseo taxonómico y contraste unificado con GBIF/ChecklistBank.
 Oculta y excluye automáticamente las columnas que no contengan ningún dato.
-Incluye la nueva columna gbif_taxonomy y el conteo de filas compatible con
+Incluye soporte para la nueva jerarquía desglosada y el conteo de filas compatible con
 CSV multilínea entrecomillado.
 """
 
@@ -97,7 +97,8 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
         "p_genus", "p_subgenus", "p_specificEpithet", "p_infraspecificRank", "p_infraspecificEpithet",
         "p_scientificNameAuthorship", "p_authorSpecies", "p_authorInfra",
         "p_nomenclaturalCode", "p_taxonRank", "p_hybridGeneric", "p_hybridSpecific", "p_cultivarName",
-        "gbif_matchType", "gbif_status", "gbif_usageKey", "gbif_scientificName", "gbif_family",
+        "gbif_matchType", "gbif_status", "gbif_usageKey", "gbif_scientificName",
+        "gbif_kingdom", "gbif_phylum", "gbif_class", "gbif_order", "gbif_family", "gbif_genus", "gbif_subgenus",
         "gbif_uri", "gbif_discrepancy", "gbif_taxonomy"
     ]
 
@@ -130,6 +131,7 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
             hib_esp_val = n_hibrido_especifico(nombre_cientifico)
             cult_val = n_cultivar(nombre_cientifico)
 
+            # Contraste con la versión unificada de GBIF/ChecklistBank
             gbif_res = verificar_con_gbif(gen, sp, infra, nombre_cientifico)
 
             extra_vals = [
@@ -140,7 +142,13 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
                 gbif_res["gbif_status"],
                 gbif_res["gbif_usageKey"],
                 gbif_res["gbif_scientificName"],
+                gbif_res["gbif_kingdom"],
+                gbif_res["gbif_phylum"],
+                gbif_res["gbif_class"],
+                gbif_res["gbif_order"],
                 gbif_res["gbif_family"],
+                gbif_res["gbif_genus"],
+                gbif_res["gbif_subgenus"],
                 gbif_res["gbif_uri"],
                 gbif_res["gbif_discrepancy"],
                 gbif_res["gbif_taxonomy"]
