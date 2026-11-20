@@ -13,7 +13,7 @@ class StarSchemaExplorer:
         self.taxon_path = Path(taxon_file)
         self.measurements_path = Path(measurements_file)
         self.vernacular_path = Path(vernacular_file)
-        
+
         self.taxon_df = pd.DataFrame()
         self.measurements_df = pd.DataFrame()
         self.vernacular_df = pd.DataFrame()
@@ -23,11 +23,20 @@ class StarSchemaExplorer:
         """Carga los tres archivos del esquema en estrella."""
         try:
             if self.taxon_path.exists():
-                self.taxon_df = pd.read_csv(self.taxon_path)
+                self.taxon_df = pd.read_csv(self.taxon_path, sep="\t")
             if self.measurements_path.exists():
-                self.measurements_df = pd.read_csv(self.measurements_path)
+                self.measurements_df = pd.read_csv(self.measurements_path, sep="\t")
             if self.vernacular_path.exists():
-                self.vernacular_df = pd.read_csv(self.vernacular_path)
+                self.vernacular_df = pd.read_csv(self.vernacular_path, sep="\t")
+
+            # Normalizar la clave relacional (tolera taxonId / taxon_id)
+            for df_attr in ("taxon_df", "measurements_df", "vernacular_df"):
+                df = getattr(self, df_attr)
+                if not df.empty and "taxonID" not in df.columns:
+                    key_col = next((c for c in df.columns if c.lower() == "taxonid"), None)
+                    if key_col:
+                        df = df.rename(columns={key_col: "taxonID"})
+                        setattr(self, df_attr, df)
         except Exception as ex:
             print(f"Error cargando el esquema en estrella: {ex}")
 
@@ -48,18 +57,18 @@ class StarSchemaExplorer:
         # Unir VernacularName (si existe)
         if not self.vernacular_df.empty:
             base = base.merge(
-                self.vernacular_df, 
-                on="taxonID", 
-                how="left", 
+                self.vernacular_df,
+                on="taxonID",
+                how="left",
                 suffixes=("", "_vernacular")
             )
 
         # Unir MeasurementsOfFacts (si existe)
         if not self.measurements_df.empty:
             base = base.merge(
-                self.measurements_df, 
-                on="taxonID", 
-                how="left", 
+                self.measurements_df,
+                on="taxonID",
+                how="left",
                 suffixes=("", "_measurement")
             )
 
@@ -70,9 +79,9 @@ class StarSchemaExplorer:
         """Extrae el perfil completo de un taxón específico cruzando las tablas."""
         if self.consolidated_df.empty:
             self.build_unified_view()
-            
+
         filtered = self.consolidated_df[self.consolidated_df["taxonID"] == taxon_id]
         if filtered.empty:
             return {}
-            
+
         return filtered.to_dict(orient="records")

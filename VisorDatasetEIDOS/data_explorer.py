@@ -4,16 +4,28 @@ data_explorer.py
 
 Capa de exploración de datos independiente para el Multivisor EIDOS,
 con soporte de vistas dinámicas, manejo de vistas sin datasets y descargas multihilo.
+
+Correcciones:
+- load_catalog() usa ahora get_datasets_distinct() (lista ligera de PostgREST)
+  y solo recurre a la descarga completa como fallback.
+- load_datasets(): reintentos persistentes con backoff exponencial por dataset.
+  Un fallo transitorio ya no descarta el dataset silenciosamente: se reintenta
+  hasta MAX_DATASET_ATTEMPTS y los fracasos definitivos se registran en
+  self.last_failed_datasets para que la GUI pueda avisar al usuario.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import time
 from pathlib import Path
 
 import pandas as pd
 
 from eidos_api import EidosAPI
+
+
+MAX_DATASET_ATTEMPTS = 6
 
 
 class DataExplorer:
@@ -32,42 +44,70 @@ class DataExplorer:
         self.api.set_view(view_name)
 
     def load_catalog(self):
-        """Carga los registros de la vista actual para poblar su propio árbol si está vacío."""
+        """
+        Carga la lista de datasets de la vista actual.
+        Primero intenta la consulta ligera (select + distinct); si la vista no
+        soporta alguna columna o falla, hace fallback a la descarga completa.
+        """
         if not self.catalog_df.empty:
             return self.catalog_df
         try:
-            self.catalog_df = self.api.get_completo(view_name=self.current_view)
-            return self.catalog_df
+            self.catalog_df = self.api.get_datasets_distinct(
+                view_name=self.current_view
+            )
         except Exception:
-            self.catalog_df = pd.DataFrame()
-            return self.catalog_df
+            try:
+                self.catalog_df = self.api.get_completo(view_name=self.current_view)
+            except Exception:
+                self.catalog_df = pd.DataFrame()
+        return self.catalog_df
 
     def load_datasets(self, dataset_ids):
         """Carga y concatena los datasets seleccionados en paralelo usando multihilos.
-           Si el dataset es sintético (ID 1 en vistas sin iddataset), descarga la vista completa."""
+           Si el dataset es sintético (ID 1 en vistas sin iddataset), descarga la vista completa.
+
+           CORREGIDO: cada dataset se reintenta hasta MAX_DATASET_ATTEMPTS con backoff
+           exponencial. Los fallos definitivos se registran en self.last_failed_datasets
+           en lugar de descartarse silenciosamente."""
         frames = []
+        self.last_failed_datasets = []
 
         def fetch_single(ds_id):
-            try:
-                has_id_col = any(
-                    c in self.catalog_df.columns
-                    for c in ["iddataset", "dataset_id", "id_dataset"]
+            last_exc = None
+            id_col_name = "iddataset"
+            has_id_col = any(
+                c in self.catalog_df.columns
+                for c in ["iddataset", "dataset_id", "id_dataset"]
+            )
+            if has_id_col:
+                id_col_name = next(
+                    (c for c in ["iddataset", "dataset_id", "id_dataset"] if c in self.catalog_df.columns),
+                    "iddataset"
                 )
-                if ds_id == 1 and not has_id_col:
-                    df = self.api.get_completo(view_name=self.current_view)
-                else:
-                    id_col_name = next(
-                        (c for c in ["iddataset", "dataset_id", "id_dataset"] if c in self.catalog_df.columns),
-                        "iddataset"
-                    )
-                    df = self.api.fetch_all(
-                        filters={id_col_name: ds_id},
-                        view_name=self.current_view
-                    )
-                if not df.empty:
+
+            for attempt in range(1, MAX_DATASET_ATTEMPTS + 1):
+                try:
+                    if ds_id == 1 and not has_id_col:
+                        df = self.api.get_completo(view_name=self.current_view)
+                    else:
+                        df = self.api.fetch_all(
+                            filters={id_col_name: ds_id},
+                            view_name=self.current_view
+                        )
+                    # Resultado válido (aunque esté vacío): no se reintenta
                     return df
-            except Exception as ex:
-                print(f"Dataset {ds_id}: {ex}")
+                except Exception as ex:
+                    last_exc = ex
+                    wait = min(30, 2 ** attempt)
+                    print(
+                        f"Dataset {ds_id}: intento {attempt}/{MAX_DATASET_ATTEMPTS} "
+                        f"fallido ({ex}). Reintentando en {wait}s..."
+                    )
+                    time.sleep(wait)
+
+            # Agotados los reintentos: registrar el fallo, no descartar en silencio
+            self.last_failed_datasets.append((ds_id, str(last_exc)))
+            print(f"Dataset {ds_id}: FALLO DEFINITIVO tras {MAX_DATASET_ATTEMPTS} intentos: {last_exc}")
             return None
 
         max_workers = min(10, len(dataset_ids)) if dataset_ids else 1
@@ -86,6 +126,13 @@ class DataExplorer:
             )
         else:
             self.df = pd.DataFrame()
+
+        if self.last_failed_datasets:
+            print(
+                f"Advertencia: {len(self.last_failed_datasets)} dataset(s) no pudieron "
+                f"cargarse tras {MAX_DATASET_ATTEMPTS} reintentos: "
+                f"{[ds for ds, _ in self.last_failed_datasets]}"
+            )
 
         return self.df
 

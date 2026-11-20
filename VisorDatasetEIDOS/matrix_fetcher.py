@@ -3,10 +3,10 @@
 import pandas as pd
 
 from config import (
-    BASE_URL,
+    BASE_URL_API,
     CATEGORY_ENDPOINTS,
     REQUEST_TIMEOUT,
-    create_session
+    crear_sesion_robusta as create_session
 )
 
 
@@ -28,7 +28,7 @@ class MatrixFetcher:
                 ]
             )
 
-        url = f"{BASE_URL}/{endpoint}"
+        url = f"{BASE_URL_API}/{endpoint}"
 
         r = self.session.get(
             url,
@@ -49,12 +49,25 @@ class MatrixFetcher:
 
         df = pd.DataFrame(data)
 
-        cols = {
-            "taxonid": "EIDOS_ID",
-            "scientificname": "scientificName"
-        }
+        # Adapta el nombre de columnas según la vista devuelta por la API
+        id_col = next(
+            (c for c in ("taxonid", "idtaxon", "taxon_id") if c in df.columns),
+            None
+        )
+        name_col = next(
+            (c for c in ("scientificname", "nombre_aceptado", "nombre_cientifico") if c in df.columns),
+            None
+        )
 
-        df = df.rename(columns=cols)
+        if not id_col or not name_col:
+            return pd.DataFrame(
+                columns=[
+                    "EIDOS_ID",
+                    "scientificName"
+                ]
+            )
+
+        df = df.rename(columns={id_col: "EIDOS_ID", name_col: "scientificName"})
 
         return df[
             [
@@ -103,14 +116,16 @@ class MatrixFetcher:
         if not universe:
             return pd.DataFrame()
 
-        universe_df = pd.concat(
-            universe,
-            ignore_index=True
-        )
-
+        # CORREGIDO: deduplicar por EIDOS_ID (conservando el primer nombre),
+        # evitando filas duplicadas cuando la API devuelve grafías distintas
+        # del mismo taxón entre categorías.
         universe_df = (
-            universe_df
-            .drop_duplicates()
+            pd.concat(
+                universe,
+                ignore_index=True
+            )
+            .sort_values("EIDOS_ID")
+            .drop_duplicates(subset=["EIDOS_ID"], keep="first")
             .reset_index(drop=True)
         )
 

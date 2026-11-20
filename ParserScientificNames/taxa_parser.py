@@ -3,6 +3,10 @@ taxa_parser.py
 ==============
 Módulo de parseo taxonómico (Botánica, Zoología, Híbridos y Cultivares)
 Adaptado directamente de la lógica optimizada en VBA.
+Correcciones incluidas:
+- normalizar_nombre: sustitución de categorías infraspecíficas con límites de
+  palabra y orden largo-primero (no corrompe form., subf., aff., cf.).
+- n_autor: cierra el paréntesis en autores zoológicos entre paréntesis.
 """
 
 import re
@@ -20,6 +24,14 @@ _regex_iniciales_anio = re.compile(
     r"([A-Za-z]\.?[A-Za-z]\.?[A-Za-z]?\.?),([1-2][0-9]{3})"
 )
 _regex_anio = re.compile(r"([1-2][0-9]{3})")
+
+# Categorías infraspecíficas ordenadas de más larga a más corta, con límite de
+# palabra a la izquierda para no tocar aff., cf., etc.
+_CATS_REGEX = re.compile(
+    r"(?<![A-Za-z])("
+    r"subform\.|subvar\.|subsp\.|subfo\.|subf\.|form\.|fo\.|ssp\.|var\.|f\."
+    r")"
+)
 
 
 def limpiar_cache():
@@ -66,21 +78,7 @@ def normalizar_nombre(nombre):
     cad = cad.replace(")", ") ")
     cad = cad.replace(",", ", ")
 
-    cats = [
-        "subsp.",
-        "ssp.",
-        "var.",
-        "subvar.",
-        "f.",
-        "fo.",
-        "form.",
-        "subf.",
-        "subfo.",
-        "subform."
-    ]
-
-    for c in cats:
-        cad = cad.replace(c, c + " ")
+    cad = _CATS_REGEX.sub(r"\1 ", cad)
 
     cad = _regex_epiteto_autor.sub(r"\1 \2", cad)
     cad = _regex_iniciales_anio.sub(r"\1, \2", cad)
@@ -250,6 +248,8 @@ def n_sp(nombre):
             return p
 
     return ""
+
+
 def n_cat_infra(nombre):
 
     cad, partes, pos, es_zoo = obtener_componentes(nombre)
@@ -320,6 +320,7 @@ def n_autor(nombre):
     cad, partes, pos, es_zoo = obtener_componentes(nombre)
 
     res = []
+    abierto = False
 
     i = pos + 1
 
@@ -333,7 +334,13 @@ def n_autor(nombre):
         if f"|{partes[i].lower()}|" in PART_BOTANICAS.lower():
             break
 
+        if partes[i] == "(":
+            abierto = True
+
         res.append(partes[i])
+
+        if partes[i] == ")" and abierto:
+            abierto = False
 
         if es_part and i < len(partes) - 1:
             i += 1
@@ -344,7 +351,12 @@ def n_autor(nombre):
 
         i += 1
 
-    return " ".join(res)
+    autor = " ".join(res)
+
+    if abierto:
+        autor += " )"
+
+    return autor
 
 
 def n_autinfra(nombre):

@@ -1,8 +1,10 @@
 """
 taxa_loader.py
 ==============
-Procesa archivos aplicando el parseo taxonómico y contraste con GBIF.
+Procesa archivos aplicando el parseo taxonómico y contraste unificado con GBIF/ChecklistBank.
 Oculta y excluye automáticamente las columnas que no contengan ningún dato.
+Incluye soporte para la nueva jerarquía desglosada y el conteo de filas compatible con
+CSV multilínea entrecomillado.
 """
 
 import os
@@ -18,7 +20,8 @@ from taxa_parser import (
     codigo_nombre_cientifico, rango_taxonomico_simple,
     n_hibrido_generico, n_hibrido_especifico, n_cultivar, limpiar_cache
 )
-from taxa_gbif import verificar_con_gbif
+from taxa_gbif import verificar_con_gbif, limpiar_cache_gbif
+
 
 def detect_encoding_and_delimiter(filepath):
     encoding_to_try = ['utf-8-sig', 'utf-8', 'cp1252', 'latin-1']
@@ -39,18 +42,19 @@ def detect_encoding_and_delimiter(filepath):
 
     lines = content.splitlines()
     first_line = lines[0] if lines else ""
-    
+
     counts = {
         ';': first_line.count(';'),
         '\t': first_line.count('\t'),
         ',': first_line.count(',')
     }
-    
+
     delimiter = max(counts, key=counts.get)
     if counts[delimiter] == 0:
         delimiter = '\t'
 
     return delimiter, used_encoding
+
 
 def inspect_file_headers(filepath):
     delim, enc = detect_encoding_and_delimiter(filepath)
@@ -64,8 +68,11 @@ def inspect_file_headers(filepath):
         pass
     return [], '\t', 'utf-8'
 
+
 def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_callback=None):
     limpiar_cache()
+    limpiar_cache_gbif()
+
     headers, delim, enc = inspect_file_headers(filepath)
     if not headers or target_col_name not in headers:
         raise ValueError(f"No se encontró la columna '{target_col_name}' en el archivo.")
@@ -77,9 +84,12 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
 
     col_idx = headers.index(target_col_name)
 
+    # Contar filas con el lector CSV (compatible con campos multilínea entrecomillados)
     total_rows = 0
     with open(filepath, encoding=enc, errors="replace") as f:
-        total_rows = sum(1 for line in f) - 1
+        r = csv.reader(f, delimiter=delim)
+        next(r, None)  # saltar cabecera
+        total_rows = sum(1 for _ in r)
     if total_rows < 1:
         total_rows = 1
 
@@ -87,7 +97,9 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
         "p_genus", "p_subgenus", "p_specificEpithet", "p_infraspecificRank", "p_infraspecificEpithet",
         "p_scientificNameAuthorship", "p_authorSpecies", "p_authorInfra",
         "p_nomenclaturalCode", "p_taxonRank", "p_hybridGeneric", "p_hybridSpecific", "p_cultivarName",
-        "gbif_matchType", "gbif_status", "gbif_usageKey", "gbif_scientificName", "gbif_family", "gbif_uri", "gbif_discrepancy"
+        "gbif_matchType", "gbif_status", "gbif_usageKey", "gbif_scientificName",
+        "gbif_kingdom", "gbif_phylum", "gbif_class", "gbif_order", "gbif_family", "gbif_genus", "gbif_subgenus",
+        "gbif_uri", "gbif_discrepancy", "gbif_taxonomy"
     ]
 
     raw_processed_rows = []
@@ -96,15 +108,15 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
     with open(filepath, encoding=enc, errors="replace") as f:
         r = csv.reader(f, delimiter=delim)
         header_row = next(r, None)
-        
+
         for row in r:
             if not row:
                 continue
             if len(row) < len(headers):
                 row += [""] * (len(headers) - len(row))
-            
+
             nombre_cientifico = row[col_idx]
-            
+
             gen = n_gen(nombre_cientifico)
             subgen = n_sub_gen(nombre_cientifico)
             sp = n_sp(nombre_cientifico)
@@ -119,6 +131,7 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
             hib_esp_val = n_hibrido_especifico(nombre_cientifico)
             cult_val = n_cultivar(nombre_cientifico)
 
+            # Contraste con la versión unificada de GBIF/ChecklistBank
             gbif_res = verificar_con_gbif(gen, sp, infra, nombre_cientifico)
 
             extra_vals = [
@@ -129,9 +142,16 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
                 gbif_res["gbif_status"],
                 gbif_res["gbif_usageKey"],
                 gbif_res["gbif_scientificName"],
+                gbif_res["gbif_kingdom"],
+                gbif_res["gbif_phylum"],
+                gbif_res["gbif_class"],
+                gbif_res["gbif_order"],
                 gbif_res["gbif_family"],
+                gbif_res["gbif_genus"],
+                gbif_res["gbif_subgenus"],
                 gbif_res["gbif_uri"],
-                gbif_res["gbif_discrepancy"]
+                gbif_res["gbif_discrepancy"],
+                gbif_res["gbif_taxonomy"]
             ]
 
             raw_processed_rows.append((row, extra_vals))
@@ -141,11 +161,11 @@ def process_taxa_file(filepath, target_col_name, output_filepath=None, progress_
                 progress_callback(current_row, total_rows)
 
     # Filtrar únicamente las columnas extra que tengan AL MENOS UN dato distinto de vacío
-    extra_columns_transposed = list(zip(*[item[1] for item in raw_processed_rows])) if raw_processed_rows else [[]]*len(candidate_extra_fields)
-    
+    extra_columns_transposed = list(zip(*[item[1] for item in raw_processed_rows])) if raw_processed_rows else [[]] * len(candidate_extra_fields)
+
     active_extra_fields = []
     active_extra_indices = []
-    
+
     for i, col_data in enumerate(extra_columns_transposed):
         if any(val != "" and val is not None for val in col_data):
             active_extra_fields.append(candidate_extra_fields[i])

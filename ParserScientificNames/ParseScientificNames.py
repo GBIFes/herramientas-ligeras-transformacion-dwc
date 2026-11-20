@@ -2,6 +2,8 @@
 ===============================================================================
 ParseScientificNames.py - Punto de Entrada Principal (Suite de Parseo Taxonómico)
 ===============================================================================
+
+incluir las actualizaciones realizadas en VisorDatasetEIDOS de las consultas al Backbone de GBIF
 """
 
 import sys

@@ -4,12 +4,10 @@ gui.py
 
 EIDOS Multivisor - Interfaz gráfica con ventana modal de configuración para DwCa,
 incorporando selección y escritura libre de measurementType y acrónimos de numeración.
-Incluye paginación de la tabla para manejar volúmenes de datos ilimitados.
 """
 
 from __future__ import annotations
 
-import math
 import threading
 import webbrowser
 import tkinter as tk
@@ -24,8 +22,6 @@ from dwca_bridge import DwCaBridge
 
 CHECK_OFF = "☐"
 CHECK_ON = "☑"
-
-PAGE_SIZE = 5000
 
 EIDOS_WEB = (
     "https://iepnb.gob.es/"
@@ -175,7 +171,7 @@ class EidosTabManager:
     def __init__(self, notebook, title, view_name):
         self.view_name = view_name
         self.explorer = DataExplorer(view_name)
-
+        
         self.frame = ttk.Frame(notebook)
         notebook.add(self.frame, text=title)
 
@@ -185,7 +181,6 @@ class EidosTabManager:
         self.current_df = None
         self.unfiltered_df = None
         self.catalog_loaded = False
-        self.current_page = 0
 
         self.build_tab_ui()
 
@@ -200,7 +195,7 @@ class EidosTabManager:
         paned.add(self.panel_right, weight=5)
 
         ttk.Label(self.panel_left, text=f"Datasets ({self.view_name})").pack(anchor="w", padx=5, pady=5)
-
+        
         container = ttk.Frame(self.panel_left)
         container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -234,7 +229,7 @@ class EidosTabManager:
         self.tree.grid(row=0, column=0, sticky="nsew")
         r_vsb.grid(row=0, column=1, sticky="ns")
         r_hsb.grid(row=1, column=0, sticky="ew")
-
+        
         right_container.rowconfigure(0, weight=1)
         right_container.columnconfigure(0, weight=1)
 
@@ -252,14 +247,13 @@ class EidosGUI:
         self.search_var = tk.StringVar()
         self.filter_column_var = tk.StringVar(value="Todas")
         self.status_var = tk.StringVar(value="Listo.")
-        self.page_var = tk.StringVar(value="")
 
         self.build_layout()
         self.root.after(200, self.check_and_load_active_tab)
 
     def build_layout(self):
         self.build_toolbar()
-
+        
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
@@ -313,40 +307,7 @@ class EidosGUI:
     def build_statusbar(self):
         status_frame = ttk.Frame(self.root)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=5, pady=2)
-
-        # Controles de paginación
-        self.btn_prev_page = ttk.Button(status_frame, text="◀ Anterior", width=10, command=self.prev_page)
-        self.btn_prev_page.pack(side=tk.RIGHT, padx=2)
-        self.btn_next_page = ttk.Button(status_frame, text="Siguiente ▶", width=12, command=self.next_page)
-        self.btn_next_page.pack(side=tk.RIGHT, padx=2)
-        ttk.Label(status_frame, textvariable=self.page_var, font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=8)
-
         ttk.Label(status_frame, textvariable=self.status_var, anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-    # --------------------------------------------------
-    # PAGINACIÓN
-    # --------------------------------------------------
-
-    def total_pages(self, tab: EidosTabManager) -> int:
-        if tab.current_df is None:
-            return 1
-        return max(1, math.ceil(len(tab.current_df) / PAGE_SIZE))
-
-    def next_page(self):
-        tab = self.get_active_tab()
-        if tab.current_df is None:
-            return
-        if tab.current_page < self.total_pages(tab) - 1:
-            tab.current_page += 1
-            self.refresh_table(tab)
-
-    def prev_page(self):
-        tab = self.get_active_tab()
-        if tab.current_df is None:
-            return
-        if tab.current_page > 0:
-            tab.current_page -= 1
-            self.refresh_table(tab)
 
     def get_active_tab(self) -> EidosTabManager:
         try:
@@ -363,7 +324,7 @@ class EidosGUI:
         if not tab.catalog_loaded:
             progress_win = ProgressWindow(self.root, title=f"Catálogo - {tab.view_name}")
             def task():
-                self.root.after(0, lambda: self.status_var.set(f"Cargando catálogo para {tab.view_name}..."))
+                self.status_var.set(f"Cargando catálogo para {tab.view_name}...")
                 progress_win.update_progress(0, 1, text=f"Cargando catálogo de {tab.view_name}...")
                 tab.explorer.load_catalog()
                 tree_data = tab.explorer.datasets_tree()
@@ -414,7 +375,7 @@ class EidosGUI:
             children = tab.dataset_tree.get_children(item)
             if not children:
                 return
-
+            
             all_on = all(tab.dataset_tree.item(child, "text").startswith(CHECK_ON) for child in children)
             target_symbol = CHECK_OFF if all_on else CHECK_ON
 
@@ -498,11 +459,10 @@ class EidosGUI:
                 else:
                     tab.current_df = df_all.copy()
 
-                tab.current_page = 0
                 progress_win.close()
                 self.setup_filter_columns()
                 self.refresh_table(tab)
-                self.status_var.set(f"Carga completa: {len(tab.current_df):,} registros disponibles.")
+                self.status_var.set(f"Carga completa: {len(tab.current_df):,} registros mostrados.")
 
             self.root.after(0, finish)
 
@@ -524,7 +484,6 @@ class EidosGUI:
             self.search_var.set("")
             self.filter_column_var.set("Todas")
             self.btn_filter_action.config(text="Filtrar")
-            tab.current_page = 0
             self.refresh_table(tab)
             return
 
@@ -547,7 +506,6 @@ class EidosGUI:
                 result = df[mask]
 
             tab.current_df = result.copy()
-            tab.current_page = 0
             self.btn_filter_action.config(text="Mostrar todos")
             self.refresh_table(tab)
         except Exception as ex:
@@ -558,7 +516,6 @@ class EidosGUI:
             return
         try:
             tab.current_df = tab.current_df.sort_values(by=col, ascending=not reverse, na_position='last')
-            tab.current_page = 0
             self.refresh_table(tab)
             tab.tree.heading(col, text=col, command=lambda: self.sort_column(tab, col, not reverse))
         except Exception as ex:
@@ -568,8 +525,6 @@ class EidosGUI:
         if tab.current_df is None:
             tab.tree.delete(*tab.tree.get_children())
             tab.tree["columns"] = []
-            self.page_var.set("")
-            self.status_var.set("Sin datos cargados.")
             return
 
         tab.tree.delete(*tab.tree.get_children())
@@ -580,31 +535,16 @@ class EidosGUI:
             tab.tree.heading(col, text=col, command=lambda c=col: self.sort_column(tab, c, False))
             tab.tree.column(col, width=200, minwidth=120, stretch=False)
 
-        # Paginación: nunca se trunca el dataset, solo se renderiza la página actual
-        total_rows = len(tab.current_df)
-        pages = self.total_pages(tab)
-        tab.current_page = min(max(0, tab.current_page), pages - 1)
-
-        start = tab.current_page * PAGE_SIZE
-        chunk = tab.current_df.iloc[start:start + PAGE_SIZE]
-
-        for _, row in chunk.iterrows():
+        for _, row in tab.current_df.head(5000).iterrows():
             tab.tree.insert("", tk.END, values=list(row))
 
-        if pages > 1:
-            self.page_var.set(f"Página {tab.current_page + 1} / {pages}")
-            self.status_var.set(
-                f"{total_rows:,} registros. Mostrando {len(chunk):,} (filas {start + 1:,}-{start + len(chunk):,})."
-            )
-        else:
-            self.page_var.set("")
-            self.status_var.set(f"{total_rows:,} registros mostrados.")
+        self.status_var.set(f"{len(tab.current_df):,} registros mostrados.")
 
     def on_tab_changed(self, event):
         self.check_and_load_active_tab()
         tab = self.get_active_tab()
         self.setup_filter_columns()
-
+        
         if tab.view_name == "v_estadolegal":
             self.btn_matrix.pack(side=tk.LEFT, padx=3)
             self.btn_dwca_view.pack(side=tk.LEFT, padx=3)
@@ -616,7 +556,7 @@ class EidosGUI:
         tab = self.get_active_tab()
         progress_win = ProgressWindow(self.root, title="Construyendo Matriz Nacional")
         def task():
-            self.root.after(0, lambda: self.status_var.set("Construyendo matriz nacional..."))
+            self.status_var.set("Construyendo matriz nacional...")
             progress_win.update_progress(0, 1, text="Procesando datos para matriz nacional...")
             df = tab.explorer.national_matrix()
             tab.unfiltered_df = df.copy()
@@ -648,21 +588,21 @@ class EidosGUI:
 
         progress_win = ProgressWindow(self.root, title="Exportando a Darwin Core")
         def task():
-            self.root.after(0, lambda: self.status_var.set("Generando paquete Darwin Core (DwCa)..."))
+            self.status_var.set("Generando paquete Darwin Core (DwCa)...")
             progress_win.update_progress(0, 1, text="Estructurando Core y Extensiones...")
-
+            
             try:
                 bridge = DwCaBridge(directory)
                 zip_path = bridge.export_dwca_package(
-                    tab.current_df,
+                    tab.current_df, 
                     f"eidos_{tab.view_name}",
                     measurement_type=config["measurement_type"],
                     dataset_acronym=config["dataset_acronym"]
                 )
-
+                
                 self.root.after(0, lambda: progress_win.close())
                 self.root.after(0, lambda: messagebox.showinfo(
-                    "Exportación Exitosa",
+                    "Exportación Exitosa", 
                     f"El paquete DwCa se ha guardado correctamente en:\n\n{zip_path}"
                 ))
                 self.root.after(0, lambda: self.status_var.set(f"Paquete DwCa guardado en: {zip_path.parent}"))
@@ -681,7 +621,7 @@ class EidosGUI:
             return
         values = tab.tree.item(selected, "values")
         columns = list(tab.current_df.columns)
-
+        
         record_dict = {columns[i]: values[i] for i in range(min(len(columns), len(values)))}
         RecordDetailWindow(self.root, record_dict, title=f"Detalle de Registro - {tab.view_name}")
 
@@ -693,11 +633,11 @@ class EidosGUI:
             return
         values = tab.tree.item(selected, "values")
         columns = list(tab.current_df.columns)
-
+        
         if "idtaxon" not in columns:
             messagebox.showwarning("Aviso", "Esta tabla no contiene idtaxon.")
             return
-
+        
         idx = columns.index("idtaxon")
         url = EIDOS_WEB + str(values[idx])
         try:
@@ -717,7 +657,7 @@ class EidosGUI:
 
         progress_win = ProgressWindow(self.root, title="Exportando datos")
         def task():
-            self.root.after(0, lambda: self.status_var.set("Exportando datos..."))
+            self.status_var.set("Exportando datos...")
             progress_win.update_progress(0, 1, text="Generando ficheros de exportación...")
             exporter = Exporter(directory)
             exporter.export_all_and_open(tab.current_df, f"eidos_{tab.view_name}")

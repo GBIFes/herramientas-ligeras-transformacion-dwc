@@ -7,23 +7,20 @@ Particiona y genera el estándar Darwin Core completo con:
 - Uso dinámico de `measurement_type` seleccionado en la UI.
 - Filtrado estricto de registros nulos y a nivel genérico (scientificName con espacios).
 - Sincronización de parámetros de identificación en Core y Extensiones.
-- Nombres comunes obtenidos de la vista `v_nombrescomunes` de la API EIDOS
-  (en sustitución del scraping HTML de las fichas web).
-- Paquete ZIP con `meta.xml`, requisito para un DwC-A válido.
 """
 
 from __future__ import annotations
 import zipfile
 import re
+import urllib.request
+import json
 import logging
+from html.parser import HTMLParser
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-
 import pandas as pd
-import requests
-
-from config import BASE_URL_API, codigo_idioma, crear_sesion_robusta
+from config import IDIOMA_PAIS
 
 # Configuración de logging para diagnóstico en tiempo real
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -37,11 +34,66 @@ SPANISH_MONTHS = {
 }
 
 
+class EidosHtmlParser(HTMLParser):
+    """
+    Parser HTML nativo para extraer los nombres comunes y sus idiomas
+    desde la tabla de la pestaña 'nomcomunes' en la web de EIDOS.
+    """
+    def __init__(self):
+        super().__init__()
+        self.in_nomcomunes = False
+        self.in_table = False
+        self.in_row = False
+        self.in_cell = False
+        self.current_row = []
+        self.rows = []
+        self.capture_data = False
+        self.current_data = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        tag_id = attrs_dict.get("id", "")
+        tag_class = attrs_dict.get("class", "")
+
+        if tag_id == "nomcomunes" or "nomcomunes" in tag_class:
+            self.in_nomcomunes = True
+
+        if self.in_nomcomunes and tag == "table":
+            self.in_table = True
+
+        if self.in_table and tag == "tr":
+            self.in_row = True
+            self.current_row = []
+
+        if self.in_row and tag in ["th", "td"]:
+            self.in_cell = True
+            self.capture_data = True
+            self.current_data = ""
+
+    def handle_endtag(self, tag):
+        if self.in_cell and tag in ["th", "td"]:
+            self.in_cell = False
+            self.capture_data = False
+            self.current_row.append(self.current_data.strip())
+
+        if self.in_row and tag == "tr":
+            self.in_row = False
+            if len(self.current_row) >= 2:
+                self.rows.append(self.current_row)
+
+        if self.in_table and tag == "table":
+            self.in_table = False
+            self.in_nomcomunes = False
+
+    def handle_data(self, data):
+        if self.capture_data:
+            self.current_data += data
+
+
 class DwCaTransformer:
     def __init__(self, output_dir: str | Path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.session = crear_sesion_robusta()
 
     def parse_norm_date(self, norma_str: str) -> str:
         """
@@ -53,18 +105,18 @@ class DwCaTransformer:
         try:
             right_slash_idx = norma_str.rfind("/")
             left_comma_idx = norma_str.find(",")
-
+            
             year = ""
             if right_slash_idx != -1 and left_comma_idx != -1 and right_slash_idx < left_comma_idx:
                 year = norma_str[right_slash_idx + 1:left_comma_idx].strip()
-
+            
             if not year or not year.isdigit() or len(year) != 4:
                 year_match = re.search(r'\b(19\d{2}|20\d{2})\b', norma_str)
                 year = year_match.group(1) if year_match else ""
 
             day_val = 1
             month = "01"
-
+            
             date_match = re.search(r'(\d{1,2})\s+de\s+([a-záéíóúñ]+)', norma_str, re.IGNORECASE)
             if date_match:
                 d_val = int(date_match.group(1))
@@ -78,7 +130,7 @@ class DwCaTransformer:
                 return f"{year}-{month}-{day_str}"
         except Exception:
             pass
-
+        
         return ""
 
     def calcular_presencia_territorial(self, row: pd.Series) -> tuple[int, int, int]:
@@ -137,12 +189,10 @@ class DwCaTransformer:
             return {}
 
         try:
-            url = f"https://api.gbif.org/v1/species/match?name={requests.utils.quote(scientific_name)}"
-            req = requests.Request(
-                "GET", url, headers={"User-Agent": "EidosDwCaBridge/2.0"}
-            ).prepare()
-            with self.session.send(req, timeout=2) as response:
-                data = response.json()
+            url = f"https://api.gbif.org/v1/species/match?name={urllib.parse.quote(scientific_name)}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'EidosDwCaBridge/2.0'})
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
                 if data.get("matchType") in ["EXACT", "FUZZY"] and "usageKey" in data:
                     return {
                         "taxonKey": f"https://www.gbif.org/species/{data['usageKey']}",
@@ -156,62 +206,45 @@ class DwCaTransformer:
             logger.warning(f"Advertencia: No se pudo consultar GBIF para '{scientific_name}' ({e}). Continuando...")
         return {}
 
-    def fetch_vernacular_api(self, idtaxon, max_retries: int = 3) -> list[tuple[str, str]]:
+    def scrape_with_redundancy(self, taxon_id_url: str, max_retries: int = 3) -> list[tuple[str, str]]:
         """
-        Obtiene los nombres comunes de un taxón desde la vista `v_nombrescomunes`
-        de la API EIDOS, con reintentos y timeout acotado.
-        Devuelve una lista de tuplas (idioma, nombre).
+        Realiza scraping web de la ficha oficial con reintentos obligatorios (redundancia) y timeout acotado.
         """
-        url = f"{BASE_URL_API}/v_nombrescomunes"
-
         for attempt in range(max_retries):
             try:
-                response = self.session.get(
-                    url,
-                    params={"idtaxon": f"eq.{idtaxon}"},
-                    timeout=15
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                results = []
-                for item in data or []:
-                    idioma = str(
-                        item.get("idioma")
-                        or item.get("language")
-                        or item.get("lenguaje")
-                        or ""
-                    ).strip()
-                    nombre = str(
-                        item.get("nombrecomun")
-                        or item.get("nombre_comun")
-                        or item.get("nombre")
-                        or item.get("vernacularname")
-                        or ""
-                    ).strip()
-
-                    if nombre and idioma.lower() not in ("idioma", "nombre", "language"):
-                        results.append((idioma, nombre))
-                return results
+                req = urllib.request.Request(taxon_id_url, headers={'User-Agent': 'EidosDwCaBridge/2.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    html_content = response.read().decode('utf-8', errors='ignore')
+                    parser = EidosHtmlParser()
+                    parser.feed(html_content)
+                    
+                    results = []
+                    for row in parser.rows:
+                        if len(row) >= 2:
+                            idioma = row[0].strip()
+                            nombre = row[1].strip()
+                            if idioma.lower() not in ["idioma", "nombre"] and nombre:
+                                results.append((idioma, nombre))
+                    return results
             except Exception as e:
-                logger.warning(f"Intento {attempt + 1}/{max_retries} fallido (v_nombrescomunes, idtaxon={idtaxon}): {e}")
+                logger.warning(f"Intento {attempt + 1}/{max_retries} fallido para {taxon_id_url}: {e}")
                 if attempt == max_retries - 1:
-                    logger.error(f"Fallo definitivo al obtener nombres comunes de idtaxon={idtaxon} tras {max_retries} intentos.")
+                    logger.error(f"Fallo definitivo al scrapear {taxon_id_url} tras {max_retries} intentos.")
         return []
 
     def transform_and_export(
-        self,
-        df: pd.DataFrame,
-        base_name: str = "lesrpe_dwca",
-        progress_callback=None,
-        mof_prefix: str | None = None,
-        vn_prefix: str | None = None,
+        self, 
+        df: pd.DataFrame, 
+        base_name: str = "lesrpe_dwca", 
+        progress_callback=None, 
+        mof_prefix: str | None = None, 
+        vn_prefix: str | None = None, 
         measurement_type: str | None = None,
         dataset_acronym: str | None = None,
         **kwargs
     ) -> Path:
         """
-        Ejecuta el proceso completo LESRPE aplicando filtros estrictos, sincronización y
+        Ejecuta el proceso completo LESRPE aplicando filtros estrictos, sincronización y 
         capturando explícitamente los parámetros de la UI (`dataset_acronym`, `measurement_type`, etc.).
         """
         if df.empty:
@@ -220,25 +253,25 @@ class DwCaTransformer:
         # Resolución robusta del acrónimo / prefijo desde cualquier variante enviada por la UI
         resolved_mof_prefix = (
             dataset_acronym or
-            mof_prefix or
+            mof_prefix or 
             kwargs.get("dataset_acronym") or
-            kwargs.get("mof_prefix") or
-            kwargs.get("prefix_mof") or
-            kwargs.get("measurement_prefix") or
-            kwargs.get("mof_id_prefix") or
-            kwargs.get("prefix") or
+            kwargs.get("mof_prefix") or 
+            kwargs.get("prefix_mof") or 
+            kwargs.get("measurement_prefix") or 
+            kwargs.get("mof_id_prefix") or 
+            kwargs.get("prefix") or 
             "LESRPE"
         ).strip()
-
+        
         resolved_vn_prefix = (
             dataset_acronym or
-            vn_prefix or
+            vn_prefix or 
             kwargs.get("dataset_acronym") or
-            kwargs.get("vn_prefix") or
-            kwargs.get("prefix_vn") or
-            kwargs.get("vernacular_prefix") or
-            kwargs.get("vn_id_prefix") or
-            kwargs.get("prefix") or
+            kwargs.get("vn_prefix") or 
+            kwargs.get("prefix_vn") or 
+            kwargs.get("vernacular_prefix") or 
+            kwargs.get("vn_id_prefix") or 
+            kwargs.get("prefix") or 
             "LESRPE"
         ).strip()
 
@@ -271,7 +304,7 @@ class DwCaTransformer:
         # 1. Filtrado estricto para descartar registros con campos taxonómicos nulos o vacíos
         name_check_cols = ['idnombre_aceptado', 'nombre_aceptado', 'idnombre_dat', 'nombre_en_dataset']
         existing_cols_to_check = [c for c in name_check_cols if c in df_work.columns]
-
+        
         if existing_cols_to_check:
             for col in existing_cols_to_check:
                 s_col = df_work[col].astype(str).str.strip().str.lower()
@@ -284,7 +317,7 @@ class DwCaTransformer:
         # 2. FILTRO ESTRUCTURAL: Descartar registros a nivel genérico (scientificName sin espacios)
         sci_col_candidates = ['nombre_aceptado', 'scientificName', 'nombre']
         sci_target_col = next((c for c in sci_col_candidates if c in df_work.columns), None)
-
+        
         if sci_target_col:
             def tiene_especie(val):
                 if not val or not isinstance(val, str):
@@ -318,7 +351,7 @@ class DwCaTransformer:
             id_t = row.get(group_col)
             id_t_str = str(id_t) if id_t is not None else ""
             taxon_id = f"https://iepnb.gob.es/areas-tematicas/especies-silvestres/eidos/{id_t_str}"
-
+            
             taxon_id_map[id_t] = taxon_id
 
             sci_name = str(row.get("nombre_aceptado", row.get("scientificName", row.get("nombre", "")))).strip()
@@ -392,10 +425,10 @@ class DwCaTransformer:
         # 2. CONSTRUCCIÓN DE MEASUREMENTOFFACTS.CSV (EXTENSIÓN 1)
         # ==========================================
         safe_progress(40, "Generando estados legales y distribución territorial sincronizados (measurementOfFacts.csv)...")
-
+        
         valid_taxon_ids = set(taxon_id_map.keys())
         df_vigentes = df_work[
-            df_work["idvigente"].astype(str).isin(["1", "1.0"]) &
+            df_work["idvigente"].astype(str).isin(["1", "1.0"]) & 
             df_work[group_col].isin(valid_taxon_ids)
         ].copy()
 
@@ -436,7 +469,7 @@ class DwCaTransformer:
 
             id_t = row.get(group_col)
             t_id = taxon_id_map.get(id_t, f"https://iepnb.gob.es/areas-tematicas/especies-silvestres/eidos/{id_t}")
-
+            
             fecha_alta_raw = row.get("fecha_alta", "")
             if pd.notna(fecha_alta_raw) and str(fecha_alta_raw).strip() not in ["", "nan", "None"]:
                 meas_date = str(fecha_alta_raw).strip()
@@ -462,7 +495,7 @@ class DwCaTransformer:
         measurements_df = pd.DataFrame(fact_records)
 
         # ==========================================
-        # 3. NOMBRES VERNÁCULOS DESDE LA API (VERNACULARNAME.CSV)
+        # 3. SCRAPING MULTIHILO SINCRONIZADO (VERNACULARNAME.CSV)
         # ==========================================
         vernacular_records = []
         n_vn = 1
@@ -470,31 +503,40 @@ class DwCaTransformer:
         completed_count = 0
         progress_lock = threading.Lock()
 
-        safe_progress(50, f"Consultando v_nombrescomunes en la API para {total_taxa} taxones...")
+        safe_progress(50, f"Iniciando scraping web multihilo sincronizado para {total_taxa} taxones...")
 
         def fetch_task(id_t, t_id):
-            names = self.fetch_vernacular_api(id_t, max_retries=3)
+            names = self.scrape_with_redundancy(t_id, max_retries=3)
             return id_t, t_id, names
 
         max_workers = min(10, max(4, total_taxa // 15)) if total_taxa > 0 else 4
-
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_taxon = {executor.submit(fetch_task, id_t, t_id): id_t for id_t, t_id in taxon_id_map.items()}
-
+            
             for future in as_completed(future_to_taxon):
                 with progress_lock:
                     completed_count += 1
                     current_done = completed_count
-
+                
                 try:
-                    id_t, t_id, api_names = future.result()
-
+                    id_t, t_id, web_names = future.result()
+                    
                     pct = 50 + int(40 * (current_done / total_taxa))
                     if current_done % max(1, (total_taxa // 20)) == 0 or current_done == total_taxa:
-                        safe_progress(pct, f"Nombres vernáculos vía API ({current_done}/{total_taxa}): ID {id_t}")
+                        safe_progress(pct, f"Scraping nombres vernáculos ({current_done}/{total_taxa}): ID {id_t}")
 
-                    for idioma_raw, nombre in api_names:
-                        lang_code = codigo_idioma(idioma_raw)
+                    for idioma_raw, nombre in web_names:
+                        lang_lower = idioma_raw.lower()
+                        lang_code = "es"
+                        if "catalán" in lang_lower or "catalan" in lang_lower:
+                            lang_code = "ca"
+                        elif "euskera" in lang_lower or "vasco" in lang_lower:
+                            lang_code = "eu"
+                        elif "inglés" in lang_lower or "english" in lang_lower:
+                            lang_code = "en"
+                        elif "gallego" in lang_lower or "galego" in lang_lower:
+                            lang_code = "gl"
 
                         with progress_lock:
                             non_local_vn_id = n_vn
@@ -502,7 +544,7 @@ class DwCaTransformer:
 
                         vernacular_records.append({
                             "vernacularNameID": f"{resolved_vn_prefix}-{id_t}-{non_local_vn_id}",
-                            "taxonID": t_id,
+                            "taxonId": t_id,
                             "vernacularName": nombre,
                             "language": lang_code,
                             "countryCode": "ES"
@@ -512,7 +554,7 @@ class DwCaTransformer:
 
         vernacular_df = pd.DataFrame(vernacular_records)
         if not vernacular_df.empty:
-            vernacular_df = vernacular_df.drop_duplicates(subset=["taxonID", "vernacularName"]).reset_index(drop=True)
+            vernacular_df = vernacular_df.drop_duplicates(subset=["taxonId", "vernacularName"]).reset_index(drop=True)
 
         # ==========================================
         # 4. EXPORTACIÓN A CSV Y EMPAQUETADO ZIP
@@ -524,7 +566,7 @@ class DwCaTransformer:
         vn_csv = self.output_dir / "vernacularName.csv"
 
         taxon_df.to_csv(taxon_csv, index=False, sep="\t", encoding="utf-8")
-
+        
         zip_files = [("taxon.csv", taxon_csv)]
 
         if not measurements_df.empty:
@@ -536,65 +578,7 @@ class DwCaTransformer:
             zip_files.append(("vernacularName.csv", vn_csv))
 
         zip_path = self.output_dir / f"{base_name}_dwca.zip"
-
-        # meta.xml: obligatorio para que el ZIP sea un DwC-A válido
-        row_type_mof = "http://rs.gbif.org/terms/1.0/MeasurementOrFact"
-        row_type_vn = "http://rs.gbif.org/terms/1.0/VernacularName"
-        meta_lines = [
-            '<archive xmlns="http://rs.tdwg.org/dwc/text/">',
-            '  <core encoding="UTF-8" fieldsTerminatedBy="\\t" linesTerminatedBy="\\n" ignoreHeaderLines="1">',
-            '    <files><location>taxon.csv</location></files>',
-            '    <id name="taxonID" />',
-            '    <field index="0" term="http://rs.tdwg.org/dwc/terms/taxonID" />',
-            '    <field index="2" term="http://rs.tdwg.org/dwc/terms/scientificName" />',
-            '    <field index="3" term="http://rs.tdwg.org/dwc/terms/license" />',
-            '    <field index="4" term="http://rs.tdwg.org/dwc/terms/rightsHolder" />',
-            '    <field index="5" term="http://rs.tdwg.org/dwc/terms/institutionCode" />',
-            '    <field index="6" term="http://purl.org/dc/terms/modified" />',
-            '    <field index="7" term="http://rs.tdwg.org/dwc/terms/higherClassification" />',
-            '    <field index="8" term="http://rs.tdwg.org/dwc/terms/kingdom" />',
-            '    <field index="9" term="http://rs.tdwg.org/dwc/terms/class" />',
-            '    <field index="10" term="http://rs.tdwg.org/dwc/terms/family" />',
-            '    <field index="11" term="http://rs.tdwg.org/dwc/terms/genus" />',
-            '    <field index="12" term="http://rs.tdwg.org/dwc/terms/subgenus" />',
-            '    <field index="16" term="http://rs.tdwg.org/dwc/terms/specificEpithet" />',
-            '    <field index="18" term="http://rs.tdwg.org/dwc/terms/infraspecificEpithet" />',
-            '    <field index="19" term="http://rs.tdwg.org/dwc/terms/scientificNameAuthorship" />',
-            '    <field index="20" term="http://rs.tdwg.org/dwc/terms/taxonomicStatus" />',
-            "  </core>",
-        ]
-        if not measurements_df.empty:
-            meta_lines += [
-                f'  <extension encoding="UTF-8" rowType="{row_type_mof}" fieldsTerminatedBy="\\t" linesTerminatedBy="\\n" ignoreHeaderLines="1">',
-                '    <files><location>measurementOfFacts.csv</location></files>',
-                '    <id name="taxonID" />',
-                '    <field index="0" term="http://rs.tdwg.org/dwc/terms/measurementID" />',
-                '    <field index="1" term="http://rs.tdwg.org/dwc/terms/taxonID" />',
-                '    <field index="2" term="http://rs.tdwg.org/dwc/terms/measurementType" />',
-                '    <field index="3" term="http://rs.tdwg.org/dwc/terms/measurementValue" />',
-                '    <field index="4" term="http://rs.tdwg.org/dwc/terms/measurementMethod" />',
-                '    <field index="5" term="http://rs.tdwg.org/dwc/terms/measurementDeterminedDate" />',
-                "  </extension>",
-            ]
-        if not vernacular_df.empty:
-            meta_lines += [
-                f'  <extension encoding="UTF-8" rowType="{row_type_vn}" fieldsTerminatedBy="\\t" linesTerminatedBy="\\n" ignoreHeaderLines="1">',
-                '    <files><location>vernacularName.csv</location></files>',
-                '    <id name="taxonID" />',
-                '    <field index="0" term="http://rs.gbif.org/terms/1.0/vernacularNameID" />',
-                '    <field index="1" term="http://rs.tdwg.org/dwc/terms/taxonID" />',
-                '    <field index="2" term="http://rs.tdwg.org/dwc/terms/vernacularName" />',
-                '    <field index="3" term="http://purl.org/dc/terms/language" />',
-                '    <field index="4" term="http://rs.tdwg.org/dwc/terms/countryCode" />',
-                "  </extension>",
-            ]
-        meta_lines.append("</archive>")
-
-        meta_path = self.output_dir / "meta.xml"
-        meta_path.write_text("\n".join(meta_lines), encoding="utf-8")
-
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(meta_path, arcname="meta.xml")
             for arcname, filepath in zip_files:
                 if filepath.exists():
                     zipf.write(filepath, arcname=arcname)
